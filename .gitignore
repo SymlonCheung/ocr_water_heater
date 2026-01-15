@@ -1,4 +1,9 @@
-*
+# 1. 忽略所有文件
+/*
+
+# 2. 排除忽略（即保留）特定的文件
 !.gitignore
-!custom_components/
 !README.md
+
+# 3. 排除忽略文件夹（注意：必须先排除文件夹，再排除其内容）
+!custom_components/

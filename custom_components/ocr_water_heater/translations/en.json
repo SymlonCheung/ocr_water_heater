@@ -1,0 +1,25 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "\u8be5\u8bbe\u5907\u5df2\u914d\u7f6e"
+        },
+        "error": {
+            "cannot_connect": "\u65e0\u6cd5\u8fde\u63a5\u5230\u8be5 URL",
+            "unknown": "\u53d1\u751f\u672a\u77e5\u9519\u8bef"
+        },
+        "step": {
+            "user": {
+                "data": {
+                    "image_url": "\u56fe\u7247 URL",
+                    "roi_h": "\u622a\u53d6\u9ad8\u5ea6 H (\u50cf\u7d20)",
+                    "roi_w": "\u622a\u53d6\u5bbd\u5ea6 W (\u50cf\u7d20)",
+                    "roi_x": "\u622a\u53d6\u533a\u57df X \u5750\u6807 (\u50cf\u7d20)",
+                    "roi_y": "\u622a\u53d6\u533a\u57df Y \u5750\u6807 (\u50cf\u7d20)",
+                    "skew_angle": "\u503e\u659c\u6821\u6b63\u89d2\u5ea6 (\u5ea6)"
+                },
+                "description": "\u8bf7\u586b\u5199\u89c6\u9891\u6d41\u5730\u5740\u53ca\u622a\u53d6\u5750\u6807 (ROI)\u3002",
+                "title": "\u914d\u7f6e OCR \u6c34\u6e29\u8ba1"
+            }
+        }
+    }
+}
