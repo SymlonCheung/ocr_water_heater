@@ -24,7 +24,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# 创建 Schema 的辅助函数
 def get_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
@@ -72,7 +71,6 @@ class OCRWaterHeaterConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 return self.async_create_entry(title=info["title"], data=user_input)
 
-        # 初始默认值
         defaults = {
             CONF_IMAGE_URL: "http://192.168.123.86:1984/api/frame.jpeg?src=reshuiqi",
             CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
@@ -93,24 +91,23 @@ class OCRWaterHeaterOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
+        # 【修复关键点】不要给 self.config_entry 赋值，改用 self._config_entry
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options."""
         errors: dict[str, str] = {}
         
         if user_input is not None:
-            # 校验连接
             try:
                 await validate_input(self.hass, user_input)
             except Exception:
                 errors["base"] = "cannot_connect"
             else:
-                # 更新 Config Entry
                 return self.async_create_entry(title="", data=user_input)
 
-        # 获取当前配置 (优先取 options，没有则取 data，最后取默认值)
-        current_config = {**self.config_entry.data, **self.config_entry.options}
+        # 这里也要改用 self._config_entry
+        current_config = {**self._config_entry.data, **self._config_entry.options}
         
         return self.async_show_form(
             step_id="init",

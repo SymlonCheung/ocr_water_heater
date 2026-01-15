@@ -11,7 +11,7 @@ STATE_PERFORMANCE = "performance"
 # 配置键
 CONF_IMAGE_URL = "image_url"
 CONF_UPDATE_INTERVAL = "update_interval"
-CONF_DEBUG_MODE = "debug_mode"  # <--- 新增
+CONF_DEBUG_MODE = "debug_mode"
 CONF_ROI_X = "roi_x"
 CONF_ROI_Y = "roi_y"
 CONF_ROI_W = "roi_w"
@@ -22,12 +22,11 @@ CONF_SKEW = "skew_angle"
 DEFAULT_ROI = (769, 339, 36, 26)
 DEFAULT_SKEW = 8.0
 DEFAULT_UPDATE_INTERVAL = 3
-DEFAULT_DEBUG_MODE = False      # <--- 默认关闭
+DEFAULT_DEBUG_MODE = False
 
-# OCR 内部参数
-# 注意：SAVE_DEBUG_IMAGES 现在只作为默认值，实际由 Options Flow 控制
-# 路径修改为你指定的绝对路径，确保容器内有权限
-DEBUG_DIR_ROOT = "/home/dev-space/core/tmp/ocr_debug" 
+# 【修复关键点】路径改为 /workspaces/core/tmp/ocr_debug
+# 这是 VSCode Dev Container 的标准挂载路径，'vscode' 用户有权限写入
+DEBUG_DIR_ROOT = "/workspaces/core/tmp/ocr_debug" 
 
 RESIZE_FACTOR = 5.0
 SIDE_CROP_PIXELS = 4

@@ -28,7 +28,7 @@ class OCRProcessor:
         self._ocr_engine = None
         self._roi = DEFAULT_ROI
         self._skew = DEFAULT_SKEW
-        self._debug_mode = False  # 新增：实例级 Debug 开关
+        self._debug_mode = False
 
         self._init_engine()
 
@@ -37,7 +37,8 @@ class OCRProcessor:
         self._roi = roi
         self._skew = skew
         self._debug_mode = debug_mode
-        _LOGGER.debug(f"OCR Configured: ROI={self._roi}, Skew={self._skew}, Debug={self._debug_mode}")
+        # 去掉频繁的 log，以免刷屏
+        # _LOGGER.debug(f"OCR Configured: ROI={self._roi}, Skew={self._skew}, Debug={self._debug_mode}")
 
     def _init_engine(self):
         try:
@@ -50,7 +51,6 @@ class OCRProcessor:
             _LOGGER.error("Failed to initialize ddddocr: %s", e)
 
     def _save_debug_img(self, save_dir, name, img):
-        # 修改：不再检查 const.SAVE_DEBUG_IMAGES，而是检查 self._debug_mode
         if self._debug_mode and save_dir and img is not None:
             if not os.path.exists(save_dir):
                 try:
@@ -63,7 +63,7 @@ class OCRProcessor:
             except Exception as e:
                 _LOGGER.error(f"Failed to save debug image: {e}")
 
-    # ... 以下辅助函数保持不变 (_unsharp_mask, _clean_ocr_text, _dddd_ocr_core, _keep_largest_contour, _center_digit_on_canvas) ...
+    # ... 这里的辅助函数 (_unsharp_mask 等) 保持原样，无需修改，省略以节省空间 ...
     def _unsharp_mask(self, image, amount=1.5):
         blurred = cv2.GaussianBlur(image, (5, 5), 1.0)
         sharpened = float(amount + 1) * image - float(amount) * blurred
@@ -294,7 +294,9 @@ class OCRProcessor:
         if img_origin is None: return None
 
         debug_path = None
-        # 使用实例变量 self._debug_mode 判断是否保存
+        timestamp = None
+        
+        # 准备 Debug 目录 (只准备名字，不创建，等 _save_debug_img 创建)
         if self._debug_mode:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             debug_path = os.path.join(DEBUG_DIR_ROOT, timestamp)
@@ -322,5 +324,18 @@ class OCRProcessor:
                     if VALID_MIN <= val <= VALID_MAX:
                         final_res = val
                 except: pass
+        
+        # 【新增逻辑】识别结束后，如果生成了 debug 目录，将其重命名以包含结果
+        if self._debug_mode and debug_path and os.path.exists(debug_path):
+            try:
+                # 构造新名字: 20260115_120000_RES_50
+                res_str = str(final_res) if final_res is not None else "None"
+                new_dir_name = f"{timestamp}_RES_{res_str}"
+                new_dir_path = os.path.join(DEBUG_DIR_ROOT, new_dir_name)
                 
+                # 重命名 (原子操作)
+                os.rename(debug_path, new_dir_path)
+            except Exception as e:
+                _LOGGER.error(f"Failed to rename debug folder: {e}")
+
         return final_res
