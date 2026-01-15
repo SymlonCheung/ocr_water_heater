@@ -24,10 +24,10 @@ DEFAULT_SKEW = 8.0
 DEFAULT_UPDATE_INTERVAL = 3
 DEFAULT_DEBUG_MODE = False
 
-# 【修复关键点】路径改为 /workspaces/core/tmp/ocr_debug
-# 这是 VSCode Dev Container 的标准挂载路径，'vscode' 用户有权限写入
+# Debug 保存路径
 DEBUG_DIR_ROOT = "/workspaces/core/tmp/ocr_debug" 
 
+# OCR 参数
 RESIZE_FACTOR = 5.0
 SIDE_CROP_PIXELS = 4
 UNSHARP_AMOUNT = 2.0

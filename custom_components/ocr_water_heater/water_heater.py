@@ -42,12 +42,16 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-def _create_processor_instance(roi, skew, debug_mode):
+def _create_processor_instance(roi, skew):
     from .ocr_processor import OCRProcessor
     processor = OCRProcessor()
-    # 传递 debug_mode
-    processor.configure(roi=roi, skew=skew, debug_mode=debug_mode)
+    processor.configure(roi=roi, skew=skew)
     return processor
+
+# 包装保存图片的函数，以便放入 executor
+def _save_debug_job(result, images):
+    from .debug_storage import save_debug_record
+    save_debug_record(result, images)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -56,7 +60,6 @@ async def async_setup_entry(
 ) -> None:
     """Set up the OCR water heater."""
     
-    # 1. 合并配置: Options 里的设置 覆盖 Data (初始设置)
     config = {**entry.data, **entry.options}
 
     url = config.get(CONF_IMAGE_URL)
@@ -68,35 +71,28 @@ async def async_setup_entry(
     roi_w = config.get(CONF_ROI_W, DEFAULT_ROI[2])
     roi_h = config.get(CONF_ROI_H, DEFAULT_ROI[3])
     roi = (roi_x, roi_y, roi_w, roi_h)
-
     skew = config.get(CONF_SKEW, DEFAULT_SKEW)
 
-    # 2. 初始化 Processor
     processor = await hass.async_add_executor_job(
-        _create_processor_instance, roi, skew, debug_mode
+        _create_processor_instance, roi, skew
     )
 
-    # 3. 初始化 Coordinator
-    coordinator = OCRCoordinator(hass, processor, url, update_interval)
+    # 传入 debug_mode
+    coordinator = OCRCoordinator(hass, processor, url, update_interval, debug_mode)
     
-    # 首次刷新
     await coordinator.async_config_entry_first_refresh()
 
     async_add_entities([OCRWaterHeaterEntity(coordinator, entry.title)])
-    
-    # 4. 监听更新: 当用户点击 Configure 修改参数时，触发重载
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
-
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload config entry."""
     await hass.config_entries.async_reload(entry.entry_id)
 
-
 class OCRCoordinator(DataUpdateCoordinator[int | None]):
     """Class to manage fetching OCR data."""
 
-    def __init__(self, hass: HomeAssistant, processor: OCRProcessor, url: str, interval: int):
+    def __init__(self, hass: HomeAssistant, processor: OCRProcessor, url: str, interval: int, debug_mode: bool):
         """Initialize."""
         super().__init__(
             hass,
@@ -106,46 +102,49 @@ class OCRCoordinator(DataUpdateCoordinator[int | None]):
         )
         self.processor = processor
         self.url = url
+        self.debug_mode = debug_mode
         self.session = aiohttp_client.async_get_clientsession(hass)
 
     async def _async_update_data(self) -> int | None:
-        """Fetch data from URL and run OCR (With Retry Logic)."""
+        """Fetch data and run OCR."""
         max_retries = 3
-        last_error = None
-
+        
         for attempt in range(1, max_retries + 1):
             try:
                 async with self.session.get(self.url, timeout=5) as response:
                     if response.status != 200:
-                        msg = f"Fetching image failed, status: {response.status}"
-                        if attempt == 1: _LOGGER.debug(msg) # 只在第一次打日志避免刷屏
-                        last_error = Exception(msg)
+                        msg = f"Fetching image failed: {response.status}"
+                        if attempt == 1: _LOGGER.debug(msg)
                         if attempt < max_retries:
                             await asyncio.sleep(1)
                             continue
-                        else:
-                            raise UpdateFailed(msg)
-                    
+                        raise UpdateFailed(msg)
                     content = await response.read()
 
-                temperature = await self.hass.async_add_executor_job(
+                # 【核心修改】接收 (result, images) 元组
+                result, debug_imgs = await self.hass.async_add_executor_job(
                     self.processor.process_image, content
                 )
 
-                if temperature is None:
-                    _LOGGER.debug("OCR returned None (recognition failed)")
+                # 【独立存储】如果开启了 Debug，且有图片，则交给 debug_storage 保存
+                # 无论 result 是 None 还是 数字，只要有图片过程就保存
+                if self.debug_mode and debug_imgs:
+                    await self.hass.async_add_executor_job(
+                        _save_debug_job, result, debug_imgs
+                    )
+
+                if result is None:
+                    _LOGGER.debug("OCR returned None")
                     return None
 
-                return temperature
+                return result
 
             except Exception as err:
-                last_error = err
                 if attempt == 1: _LOGGER.debug(f"Connection error: {err}")
                 if attempt < max_retries:
                     await asyncio.sleep(1)
                 else:
-                    raise UpdateFailed(f"Failed to fetch image: {last_error}")
-
+                    raise UpdateFailed(f"Failed: {err}")
 
 class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity):
     """Representation of an OCR Water Heater."""
@@ -161,7 +160,6 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
     _attr_name = None 
 
     def __init__(self, coordinator: OCRCoordinator, device_name: str) -> None:
-        """Initialize the entity."""
         super().__init__(coordinator)
         self._attr_unique_id = f"ocr_wh_{coordinator.url}"
         self._attr_device_info = {
@@ -176,9 +174,7 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
 
     @property
     def current_operation(self) -> str:
-        if self.coordinator.data is not None:
-            return STATE_PERFORMANCE
-        return STATE_OFF
+        return STATE_PERFORMANCE if self.coordinator.data is not None else STATE_OFF
 
     @property
     def current_temperature(self) -> float | None:
