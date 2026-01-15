@@ -43,6 +43,11 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# 【新增】防抖容错次数
+# 假设更新频率是 500ms，设置为 20 次意味着：
+# 只有连续识别失败超过 10秒 (20 * 0.5)，才认为是真关机。
+MAX_FAIL_TOLERANCE = 5
+
 # 工厂函数：创建处理器
 def _create_processors(roi, skew):
     from .ocr_processor import OCRProcessor
@@ -121,7 +126,8 @@ class OCRCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             hass,
             _LOGGER,
             name="OCR Water Heater",
-            update_interval=timedelta(seconds=interval),
+            # 注意：这里使用 milliseconds，因为你在 const.py 里把默认值改大了
+            update_interval=timedelta(milliseconds=interval),
         )
         self.ocr_processor = ocr_processor
         self.mode_processor = mode_processor
@@ -129,13 +135,18 @@ class OCRCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.debug_mode = debug_mode
         self.session = aiohttp_client.async_get_clientsession(hass)
 
+        # 【新增】状态缓存和计数器
+        self._last_valid_data: dict[str, Any] | None = None
+        self._fail_count = 0
+
     async def _async_update_data(self) -> dict[str, Any] | None:
         """Fetch data and run OCR + Mode Detection."""
         max_retries = 3
 
         for attempt in range(1, max_retries + 1):
             try:
-                async with self.session.get(self.url, timeout=5) as response:
+                # 考虑到弱网环境，超时给足 10 秒
+                async with self.session.get(self.url, timeout=10) as response:
                     if response.status != 200:
                         msg = f"Fetching image failed: {response.status}"
                         if attempt == 1: _LOGGER.debug(msg)
@@ -169,23 +180,43 @@ class OCRCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         _save_debug_job, res_str, all_debug_imgs
                     )
 
-                # 构造返回数据
-                # 逻辑: 
-                # - 如果 OCR 没结果 -> 视为完全无法读取或关闭 -> 返回 None 或 特殊标识
-                # - 如果 OCR 有结果 -> 视为开机
+                # =========================================================
+                # 【核心修改：防抖逻辑】
+                # =========================================================
                 
-                if temp_result is None:
-                    # 无法识别温度，视为"关闭"或数据无效
-                    _LOGGER.debug("OCR Temp returned None")
-                    return None
+                # 1. 判断本次识别是否有效 (只要温度识别出来就算有效)
+                if temp_result is not None:
+                    # 如果 mode 没识别出来，默认给待机
+                    final_mode = mode_result if mode_result else MODE_STANDBY
+                    
+                    current_data = {
+                        "temp": temp_result,
+                        "mode": final_mode
+                    }
+                    
+                    # 【成功】：更新缓存，重置计数器
+                    self._last_valid_data = current_data
+                    self._fail_count = 0
+                    return current_data
                 
-                # 如果 mode_result 是 None (没有识别到光标)，默认为 "Standby"
-                final_mode = mode_result if mode_result else MODE_STANDBY
-
-                return {
-                    "temp": temp_result,
-                    "mode": final_mode
-                }
+                else:
+                    # 【失败】：可能是真关机，也可能是闪烁/OCR失败
+                    self._fail_count += 1
+                    
+                    # 2. 检查是否在容忍范围内
+                    if self._fail_count <= MAX_FAIL_TOLERANCE:
+                        if self._last_valid_data is not None:
+                            # _LOGGER.debug("Using cached data due to blink/glitch.")
+                            # 返回上一次的数据，假装一切正常
+                            return self._last_valid_data
+                        else:
+                            # 刚启动 HA 就识别失败，无缓存可用
+                            return None
+                    else:
+                        # 3. 超过容忍次数，判定为真关机
+                        # _LOGGER.debug("Fail limit reached. Setting state to OFF.")
+                        self._last_valid_data = None # 清空缓存
+                        return None
 
             except Exception as err:
                 if attempt == 1: _LOGGER.debug(f"Connection error: {err}")

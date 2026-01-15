@@ -28,7 +28,7 @@ def get_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(CONF_IMAGE_URL, default=defaults.get(CONF_IMAGE_URL)): str,
-            vol.Optional(CONF_UPDATE_INTERVAL, default=defaults.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)): vol.All(vol.Coerce(int), vol.Range(min=1)),
+            vol.Optional(CONF_UPDATE_INTERVAL, default=defaults.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)): vol.All(vol.Coerce(int), vol.Range(min=100)),
             vol.Optional(CONF_DEBUG_MODE, default=defaults.get(CONF_DEBUG_MODE, DEFAULT_DEBUG_MODE)): bool,
             
             vol.Optional(CONF_ROI_X, default=defaults.get(CONF_ROI_X, DEFAULT_ROI[0])): vol.Coerce(int),
@@ -72,7 +72,7 @@ class OCRWaterHeaterConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(title=info["title"], data=user_input)
 
         defaults = {
-            CONF_IMAGE_URL: "http://192.168.123.86:1984/api/frame.jpeg?src=reshuiqi",
+            CONF_IMAGE_URL: "http://192.168.123.86:5000/api/reshuiqi/latest.jpg",
             CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
             CONF_DEBUG_MODE: DEFAULT_DEBUG_MODE,
             CONF_ROI_X: DEFAULT_ROI[0],
