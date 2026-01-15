@@ -7,7 +7,7 @@ from .const import DEBUG_DIR_ROOT
 
 _LOGGER = logging.getLogger(__name__)
 
-def save_debug_record(result: int | None, images: dict[str, any]):
+def save_debug_record(result: str | int | None, images: dict[str, any]):
     """
     保存 OCR 调试记录到文件夹。
     
