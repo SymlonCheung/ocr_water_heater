@@ -7,7 +7,8 @@ import ddddocr
 from .const import (
     RESIZE_FACTOR, SIDE_CROP_PIXELS, UNSHARP_AMOUNT, VALID_MIN, VALID_MAX,
     MODE_A_SMART_SLIM, MODE_A_SLIM_THRESHOLD, MODE_A_FORCE_ERODE,
-    CHAR_REPLACE_MAP, DEFAULT_ROI, DEFAULT_SKEW
+    CHAR_REPLACE_MAP, DEFAULT_ROI, DEFAULT_SKEW,
+    OCR_MIN_PEAK_BRIGHTNESS  # <--- 新增常量
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,6 +122,19 @@ class OCRProcessor:
         gray_base = self._preprocess_base(img_origin, debug_imgs)
         if gray_base is None:
             return None, debug_imgs
+
+        # === 核心修改：增加亮度检查防止误识别噪声 ===
+        # LED 数字通常非常亮 (接近 255)。
+        # 如果 ROI 区域内的最大亮度都很低 (例如低于 80)，说明屏幕是黑的。
+        # 这种情况下继续二值化会把背景噪声放大成随机字符 (如 'A'->'4' 或 '1')。
+        peak_brightness = np.max(gray_base)
+        if peak_brightness < OCR_MIN_PEAK_BRIGHTNESS:
+            _LOGGER.debug("Skipping OCR: Peak brightness %s < %s (Screen likely OFF)", 
+                          peak_brightness, OCR_MIN_PEAK_BRIGHTNESS)
+            # 可以在 Debug 图片中保存一下，方便排查
+            debug_imgs["00_Skipped_Dark.jpg"] = gray_base
+            return None, debug_imgs
+        # ==========================================
 
         # 2. 图像增强 (Gamma & Otsu Binary)
         gamma = 1.5

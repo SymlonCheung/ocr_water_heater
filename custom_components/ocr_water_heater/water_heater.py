@@ -30,6 +30,7 @@ from .const import (
     DOMAIN,
     CONF_IMAGE_URL, CONF_UPDATE_INTERVAL, CONF_DEBUG_MODE, CONF_SKEW,
     DEFAULT_UPDATE_INTERVAL, DEFAULT_DEBUG_MODE, DEFAULT_SKEW,
+    CONF_PANEL_X, CONF_PANEL_Y, CONF_PANEL_W, CONF_PANEL_H, DEFAULT_ROI_PANEL,
     CONF_OCR_X, CONF_OCR_Y, CONF_OCR_W, CONF_OCR_H, DEFAULT_ROI_OCR,
     CONF_SET_X, CONF_SET_Y, CONF_SET_W, CONF_SET_H, DEFAULT_ROI_SETTING,
     CONF_LOW_X, CONF_LOW_Y, CONF_LOW_W, CONF_LOW_H, DEFAULT_ROI_LOW,
@@ -58,21 +59,31 @@ def _create_processors(config):
         config.get(CONF_OCR_W, DEFAULT_ROI_OCR[2]),
         config.get(CONF_OCR_H, DEFAULT_ROI_OCR[3])
     )
-    skew = config.get(CONF_SKEW, DEFAULT_SKEW)
     
+    # 获取 Panel ROI (如果 config 里没有，就用默认值)
+    panel_roi = (
+        config.get(CONF_PANEL_X, DEFAULT_ROI_PANEL[0]),
+        config.get(CONF_PANEL_Y, DEFAULT_ROI_PANEL[1]),
+        config.get(CONF_PANEL_W, DEFAULT_ROI_PANEL[2]),
+        config.get(CONF_PANEL_H, DEFAULT_ROI_PANEL[3])
+    )
+
+    skew = config.get(CONF_SKEW, DEFAULT_SKEW)
+
     ocr_p = OCRProcessor()
     ocr_p.configure(roi=ocr_roi, skew=skew)
-    
+
     mode_rois = {
         "setting": (config.get(CONF_SET_X, DEFAULT_ROI_SETTING[0]), config.get(CONF_SET_Y, DEFAULT_ROI_SETTING[1]), config.get(CONF_SET_W, DEFAULT_ROI_SETTING[2]), config.get(CONF_SET_H, DEFAULT_ROI_SETTING[3])),
         "low":     (config.get(CONF_LOW_X, DEFAULT_ROI_LOW[0]), config.get(CONF_LOW_Y, DEFAULT_ROI_LOW[1]), config.get(CONF_LOW_W, DEFAULT_ROI_LOW[2]), config.get(CONF_LOW_H, DEFAULT_ROI_LOW[3])),
         "half":    (config.get(CONF_HALF_X, DEFAULT_ROI_HALF[0]), config.get(CONF_HALF_Y, DEFAULT_ROI_HALF[1]), config.get(CONF_HALF_W, DEFAULT_ROI_HALF[2]), config.get(CONF_HALF_H, DEFAULT_ROI_HALF[3])),
         "full":    (config.get(CONF_FULL_X, DEFAULT_ROI_FULL[0]), config.get(CONF_FULL_Y, DEFAULT_ROI_FULL[1]), config.get(CONF_FULL_W, DEFAULT_ROI_FULL[2]), config.get(CONF_FULL_H, DEFAULT_ROI_FULL[3]))
     }
-    
+
     mode_p = ModeProcessor()
-    mode_p.configure(rois=mode_rois)
-    
+    # 注意这里传参变了：加入了 panel_roi 和 ocr_roi
+    mode_p.configure(panel_roi=panel_roi, sub_rois=mode_rois, ocr_roi=ocr_roi)
+
     return ocr_p, mode_p
 
 def _save_debug_job(result_str, images):
