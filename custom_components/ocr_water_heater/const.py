@@ -1,39 +1,33 @@
 """Constants for the OCR Water Heater integration."""
-
 from homeassistant.const import Platform
 
 DOMAIN = "ocr_water_heater"
 DEFAULT_NAME = "Smart Water Heater"
 PLATFORMS: list[Platform] = [Platform.WATER_HEATER]
 
-# ==============================================================================
-# 【状态常量】(弥补 homeassistant.const 中缺失的部分)
-# ==============================================================================
+# 状态常量
 STATE_PERFORMANCE = "performance"
 
-# ==============================================================================
-# 【Config Flow 配置键】
-# ==============================================================================
+# 配置键
 CONF_IMAGE_URL = "image_url"
+CONF_UPDATE_INTERVAL = "update_interval"
+CONF_DEBUG_MODE = "debug_mode"  # <--- 新增
 CONF_ROI_X = "roi_x"
 CONF_ROI_Y = "roi_y"
 CONF_ROI_W = "roi_w"
 CONF_ROI_H = "roi_h"
 CONF_SKEW = "skew_angle"
-CONF_UPDATE_INTERVAL = "update_interval"  # <--- 新增这一行
 
-# ==============================================================================
-# 【Config 默认值】
-# ==============================================================================
+# 默认值
 DEFAULT_ROI = (769, 339, 36, 26)
 DEFAULT_SKEW = 8.0
-DEFAULT_UPDATE_INTERVAL = 3  # <--- 新增默认值为 3秒
+DEFAULT_UPDATE_INTERVAL = 3
+DEFAULT_DEBUG_MODE = False      # <--- 默认关闭
 
-# ==============================================================================
-# 【OCR 内部算法参数】
-# ==============================================================================
-SAVE_DEBUG_IMAGES = False
-DEBUG_DIR_ROOT = "./tmp/ocr_debug_1.1"
+# OCR 内部参数
+# 注意：SAVE_DEBUG_IMAGES 现在只作为默认值，实际由 Options Flow 控制
+# 路径修改为你指定的绝对路径，确保容器内有权限
+DEBUG_DIR_ROOT = "/home/dev-space/core/tmp/ocr_debug" 
 
 RESIZE_FACTOR = 5.0
 SIDE_CROP_PIXELS = 4

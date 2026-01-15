@@ -11,13 +11,12 @@ from .const import (
     RESIZE_FACTOR, SIDE_CROP_PIXELS, UNSHARP_AMOUNT,
     VALID_MIN, VALID_MAX, MODE_A_SMART_SLIM, MODE_A_SLIM_THRESHOLD, MODE_A_FORCE_ERODE,
     SPLIT_OVERLAP_PX, SOLVER_THRESHOLDS, CHAR_REPLACE_MAP,
-    SAVE_DEBUG_IMAGES, DEBUG_DIR_ROOT,
-    DEFAULT_ROI, DEFAULT_SKEW # 导入默认值以防万一
+    DEBUG_DIR_ROOT,
+    DEFAULT_ROI, DEFAULT_SKEW
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# 1. 修复 Pillow 10+ Removed ANTIALIAS
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
@@ -27,37 +26,44 @@ class OCRProcessor:
     def __init__(self):
         """Initialize the OCR engine."""
         self._ocr_engine = None
-        # 初始化默认参数，后续通过 configure 更新
         self._roi = DEFAULT_ROI
         self._skew = DEFAULT_SKEW
-        
+        self._debug_mode = False  # 新增：实例级 Debug 开关
+
         self._init_engine()
 
-    def configure(self, roi: tuple[int, int, int, int], skew: float):
+    def configure(self, roi: tuple[int, int, int, int], skew: float, debug_mode: bool = False):
         """Update OCR processing parameters dynamically."""
         self._roi = roi
         self._skew = skew
-        _LOGGER.debug("OCR Configured: ROI=%s, Skew=%.1f", self._roi, self._skew)
+        self._debug_mode = debug_mode
+        _LOGGER.debug(f"OCR Configured: ROI={self._roi}, Skew={self._skew}, Debug={self._debug_mode}")
 
     def _init_engine(self):
         try:
-            # show_ad=False 在某些版本可能不可用，try-except处理
             try:
                 self._ocr_engine = ddddocr.DdddOcr(show_ad=False)
             except TypeError:
                 self._ocr_engine = ddddocr.DdddOcr()
-            
-            # 强制限定纯数字
             self._ocr_engine.set_ranges("0123456789")
         except Exception as e:
             _LOGGER.error("Failed to initialize ddddocr: %s", e)
 
     def _save_debug_img(self, save_dir, name, img):
-        if SAVE_DEBUG_IMAGES and save_dir and img is not None:
+        # 修改：不再检查 const.SAVE_DEBUG_IMAGES，而是检查 self._debug_mode
+        if self._debug_mode and save_dir and img is not None:
             if not os.path.exists(save_dir):
-                os.makedirs(save_dir, exist_ok=True)
-            cv2.imwrite(os.path.join(save_dir, name), img)
+                try:
+                    os.makedirs(save_dir, exist_ok=True)
+                except OSError as e:
+                    _LOGGER.error(f"Cannot create debug dir {save_dir}: {e}")
+                    return
+            try:
+                cv2.imwrite(os.path.join(save_dir, name), img)
+            except Exception as e:
+                _LOGGER.error(f"Failed to save debug image: {e}")
 
+    # ... 以下辅助函数保持不变 (_unsharp_mask, _clean_ocr_text, _dddd_ocr_core, _keep_largest_contour, _center_digit_on_canvas) ...
     def _unsharp_mask(self, image, amount=1.5):
         blurred = cv2.GaussianBlur(image, (5, 5), 1.0)
         sharpened = float(amount + 1) * image - float(amount) * blurred
@@ -145,13 +151,10 @@ class OCRProcessor:
     def _preprocess_base(self, image, debug_path=None):
         if image is None: return None
         
-        # 【修改点】使用实例变量 self._roi
         x, y, w, h = self._roi
         h_img, w_img = image.shape[:2]
         
-        # 安全检查 ROI
         if x+w > w_img or y+h > h_img:
-            # 只有当严重越界时才警告，轻微越界切片会自动处理
             if x >= w_img or y >= h_img:
                 _LOGGER.warning(f"ROI完全越界: img={w_img}x{h_img}, ROI={self._roi}")
                 return None
@@ -163,7 +166,6 @@ class OCRProcessor:
         
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        # 【修改点】使用实例变量 self._skew
         if self._skew != 0:
             rows, cols = gray.shape
             theta = np.deg2rad(self._skew)
@@ -184,7 +186,6 @@ class OCRProcessor:
         return gray
 
     def _run_mode_a(self, gray_base, debug_path=None):
-        # ... (此方法逻辑不变) ...
         gamma = 1.5
         invGamma = 1.0 / gamma
         table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
@@ -223,7 +224,6 @@ class OCRProcessor:
         return clean
 
     def _run_mode_b(self, gray_base, debug_path=None):
-        # ... (此方法逻辑不变) ...
         def find_split(g):
             _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             if cv2.countNonZero(b) < (b.size * 0.5): b = cv2.bitwise_not(b)
@@ -281,7 +281,7 @@ class OCRProcessor:
         return ""
 
     def process_image(self, img_bytes):
-        """主入口：接收 bytes，返回 int 或 None"""
+        """主入口"""
         if not img_bytes:
             return None
         
@@ -294,17 +294,15 @@ class OCRProcessor:
         if img_origin is None: return None
 
         debug_path = None
-        if SAVE_DEBUG_IMAGES:
+        # 使用实例变量 self._debug_mode 判断是否保存
+        if self._debug_mode:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             debug_path = os.path.join(DEBUG_DIR_ROOT, timestamp)
 
-        # 1. 预处理 (使用 configure 好的参数)
         gray_base = self._preprocess_base(img_origin, debug_path)
         if gray_base is None: return None
 
-        # 2. Mode A (整体)
         res_a = self._run_mode_a(gray_base, debug_path)
-        
         final_res = None
         valid_a = False
 
@@ -316,7 +314,6 @@ class OCRProcessor:
                     final_res = val
             except: pass
 
-        # 3. Mode B (切分, 如果 A 失败)
         if not valid_a:
             res_b = self._run_mode_b(gray_base, debug_path)
             if len(res_b) == 2:

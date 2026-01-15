@@ -13,6 +13,20 @@
           "roi_h": "截取高度 H (像素)",
           "skew_angle": "倾斜校正角度 (度)"
         }
+      },
+      "init": {
+        "title": "修改参数",
+        "description": "修改参数后将自动重新加载。",
+        "data": {
+          "image_url": "图片 URL",
+          "update_interval": "更新频率 (秒)",
+          "debug_mode": "开启调试模式 (保存图片到 tmp/ocr_debug)",
+          "roi_x": "截取区域 X 坐标 (像素)",
+          "roi_y": "截取区域 Y 坐标 (像素)",
+          "roi_w": "截取宽度 W (像素)",
+          "roi_h": "截取高度 H (像素)",
+          "skew_angle": "倾斜校正角度 (度)"
+        }
       }
     },
     "error": {
