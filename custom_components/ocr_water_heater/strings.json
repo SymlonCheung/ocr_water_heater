@@ -3,9 +3,11 @@
     "step": {
       "user": {
         "title": "配置OCR热水器",
-        "description": "请填写视频流地址及截取坐标 (ROI)。",
+        "description": "请填写视频流地址、控制网关信息及截取坐标 (ROI)。",
         "data": {
           "image_url": "图片 URL",
+          "miio_ip": "网关/空调伴侣 IP",
+          "miio_token": "网关/空调伴侣 Token",
           "update_interval": "更新频率 (毫秒)",
           "roi_x": "截取区域 X 坐标 (像素)",
           "roi_y": "截取区域 Y 坐标 (像素)",
@@ -19,6 +21,8 @@
         "description": "修改参数后将自动重新加载。",
         "data": {
           "image_url": "图片 URL",
+          "miio_ip": "网关/空调伴侣 IP",
+          "miio_token": "网关/空调伴侣 Token",
           "update_interval": "更新频率 (毫秒)",
           "debug_mode": "开启调试模式 (保存图片到 tmp/ocr_debug)",
           "roi_x": "截取区域 X 坐标 (像素)",

@@ -45,6 +45,9 @@ CONF_UPDATE_INTERVAL = "update_interval"
 CONF_DEBUG_MODE = "debug_mode"
 CONF_SKEW = "skew_angle"
 CONF_GAMMA = "gamma" 
+# --- NEW MIIO CONSTANTS ---
+CONF_MIIO_IP = "miio_ip"
+CONF_MIIO_TOKEN = "miio_token"
 
 CONF_PANEL_X, CONF_PANEL_Y, CONF_PANEL_W, CONF_PANEL_H = "panel_x", "panel_y", "panel_w", "panel_h"
 

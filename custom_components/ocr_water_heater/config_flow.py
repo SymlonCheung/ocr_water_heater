@@ -17,6 +17,7 @@ from homeassistant.helpers import aiohttp_client
 from .const import (
     DOMAIN,
     CONF_IMAGE_URL, CONF_UPDATE_INTERVAL, CONF_DEBUG_MODE, CONF_SKEW,
+    CONF_MIIO_IP, CONF_MIIO_TOKEN,  # <--- New imports
     DEFAULT_UPDATE_INTERVAL, DEFAULT_DEBUG_MODE, DEFAULT_SKEW,
     CONF_OCR_X, CONF_OCR_Y, CONF_OCR_W, CONF_OCR_H, DEFAULT_ROI_OCR,
     CONF_SET_X, CONF_SET_Y, CONF_SET_W, CONF_SET_H, DEFAULT_ROI_SETTING,
@@ -32,6 +33,10 @@ def get_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(CONF_IMAGE_URL, default=defaults.get(CONF_IMAGE_URL)): str,
+            # --- New Fields for Miio ---
+            vol.Optional(CONF_MIIO_IP, default=defaults.get(CONF_MIIO_IP, "")): str,
+            vol.Optional(CONF_MIIO_TOKEN, default=defaults.get(CONF_MIIO_TOKEN, "")): str,
+            # ---------------------------
             vol.Optional(CONF_UPDATE_INTERVAL, default=defaults.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)): vol.All(vol.Coerce(int), vol.Range(min=100)),
             vol.Optional(CONF_SKEW, default=defaults.get(CONF_SKEW, DEFAULT_SKEW)): vol.Coerce(float),
             vol.Optional(CONF_DEBUG_MODE, default=defaults.get(CONF_DEBUG_MODE, DEFAULT_DEBUG_MODE)): bool,
@@ -40,7 +45,8 @@ def get_schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(CONF_OCR_Y, default=defaults.get(CONF_OCR_Y, DEFAULT_ROI_OCR[1])): int,
             vol.Optional(CONF_OCR_W, default=defaults.get(CONF_OCR_W, DEFAULT_ROI_OCR[2])): int,
             vol.Optional(CONF_OCR_H, default=defaults.get(CONF_OCR_H, DEFAULT_ROI_OCR[3])): int,
-
+            
+            # ... [保留原有的其他 ROI 配置] ...
             vol.Optional(CONF_SET_X, default=defaults.get(CONF_SET_X, DEFAULT_ROI_SETTING[0])): int,
             vol.Optional(CONF_SET_Y, default=defaults.get(CONF_SET_Y, DEFAULT_ROI_SETTING[1])): int,
             vol.Optional(CONF_SET_W, default=defaults.get(CONF_SET_W, DEFAULT_ROI_SETTING[2])): int,
@@ -92,9 +98,12 @@ class OCRWaterHeaterConfigFlow(ConfigFlow, domain=DOMAIN):
 
         defaults = {
             CONF_IMAGE_URL: "http://192.168.123.86:5000/api/reshuiqi/latest.jpg",
+            CONF_MIIO_IP: "",
+            CONF_MIIO_TOKEN: "",
             CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
             CONF_DEBUG_MODE: DEFAULT_DEBUG_MODE,
             CONF_SKEW: DEFAULT_SKEW,
+            # ... ROI defaults ...
             CONF_OCR_X: DEFAULT_ROI_OCR[0], CONF_OCR_Y: DEFAULT_ROI_OCR[1], CONF_OCR_W: DEFAULT_ROI_OCR[2], CONF_OCR_H: DEFAULT_ROI_OCR[3],
             CONF_SET_X: DEFAULT_ROI_SETTING[0], CONF_SET_Y: DEFAULT_ROI_SETTING[1], CONF_SET_W: DEFAULT_ROI_SETTING[2], CONF_SET_H: DEFAULT_ROI_SETTING[3],
             CONF_LOW_X: DEFAULT_ROI_LOW[0], CONF_LOW_Y: DEFAULT_ROI_LOW[1], CONF_LOW_W: DEFAULT_ROI_LOW[2], CONF_LOW_H: DEFAULT_ROI_LOW[3],
