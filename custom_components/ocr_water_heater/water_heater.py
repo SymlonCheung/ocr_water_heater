@@ -224,18 +224,17 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
         self._last_active_time = 0.0
         self._last_setting_seen_time = 0.0
         
-        # --- 核心修改：设置初始时间，确保启动后快速触发 ---
-        
-        # 1. 保活 (Keep Alive): 设为 0，确保系统启动后的第一次刷新立即触发唤醒
+        # 定时器管理
         self._last_keep_alive = 0
+        self._last_target_sync = 0 # 初始设为0，由启动自检逻辑接管
         
-        # 2. 目标同步 (Target Sync): 设为 (现在 - 间隔 + 15秒)
-        # 效果：系统启动 15 秒后，触发第一次温度同步
-        # 目的：给屏幕唤醒和 OCR 稳定留出时间，避免开机即同步导致读数错误
-        self._last_target_sync = time.time() - TARGET_TEMP_SYNC_INTERVAL + 15.0
-        
+        # 任务管理
         self._adjust_task: asyncio.Task | None = None
         self._sync_task: asyncio.Task | None = None
+        self._startup_task: asyncio.Task | None = None
+        
+        # 启动自检标记
+        self._startup_sequence_done = False
 
     @property
     def current_operation(self) -> str:
@@ -246,6 +245,17 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
         data = self.coordinator.data
         if not data:
             super()._handle_coordinator_update()
+            return
+
+        # =========================================================
+        # 启动自检逻辑 (Startup Sequence)
+        # =========================================================
+        if not self._startup_sequence_done:
+            self._startup_sequence_done = True
+            _LOGGER.info("[实体] 检测到系统启动，执行【启动自检序列】...")
+            # 启动一个后台任务处理开机/同步/关机
+            self._startup_task = self.hass.async_create_task(self._async_run_startup_sequence())
+            # 暂时不执行后续常规逻辑
             return
 
         raw_val = data.get("temp")
@@ -285,27 +295,27 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
                 self._last_keep_alive = current_time
                 self.hass.async_create_task(self._async_run_keep_alive())
 
-        # 2. 定时同步
+        # 2. 定时同步 (排除自检任务、调节任务)
         is_adjusting = (self._adjust_task and not self._adjust_task.done())
         is_syncing = (self._sync_task and not self._sync_task.done())
+        is_startup = (self._startup_task and not self._startup_task.done())
         
-        if not is_adjusting and not is_syncing:
-             if (current_time - self._last_target_sync) > TARGET_TEMP_SYNC_INTERVAL:
+        if not is_adjusting and not is_syncing and not is_startup:
+             # 如果从未同步过(0)，或者到了间隔
+             if self._last_target_sync == 0 or (current_time - self._last_target_sync) > TARGET_TEMP_SYNC_INTERVAL:
                  self._last_target_sync = current_time
                  self._sync_task = self.hass.async_create_task(self._async_sync_temp_process())
 
         super()._handle_coordinator_update()
 
     async def _async_run_keep_alive(self):
-        _LOGGER.debug("[实体] 定时保活: 唤醒屏幕 (Screen On)")
+        _LOGGER.debug("[实体] 定时保活: 唤醒屏幕")
         await self._controller.async_screen_on()
 
     async def _read_reliable_temp(self, expected_hint: int, sample_count: int = 3) -> int | None:
-        """
-        可靠读取机制：连续采样 + 投票 + 偏差过滤。
-        """
+        """可靠读取机制."""
         samples = []
-        _LOGGER.info(f"[读取] 开始多次采样 (计划 {sample_count} 次)...")
+        _LOGGER.info(f"[读取] 开始采样 ({sample_count} 次)...")
         
         for i in range(sample_count):
             await self.coordinator.async_request_refresh()
@@ -315,20 +325,78 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
             await asyncio.sleep(0.4) 
 
         if not samples:
-            _LOGGER.warning("[读取] 多次采样均为空.")
+            _LOGGER.warning("[读取] 采样为空.")
             return None
 
         counts = Counter(samples)
-        _LOGGER.info(f"[读取] 采样结果: {samples} -> 统计: {counts}")
+        _LOGGER.info(f"[读取] 统计: {counts}")
         
         most_common = counts.most_common(1) 
         best_val, count = most_common[0]
         
         if len(samples) > 1 and count == 1:
             best_val = min(samples, key=lambda x: abs(x - expected_hint))
-            _LOGGER.info(f"[读取] 样本分歧，选取接近参考值({expected_hint})的样本: {best_val}")
+            _LOGGER.info(f"[读取] 选取接近参考值({expected_hint}): {best_val}")
         
         return best_val
+
+    async def _async_run_startup_sequence(self):
+        """
+        启动自检序列:
+        1. 检查当前状态 (Coordinator可能已经是OFF)
+        2. 如果OFF -> 闪电开机 -> 读数 -> 闪电关机
+        3. 如果ON -> 标准同步
+        """
+        _LOGGER.info("[自检] 开始启动自检序列...")
+        
+        # 等待一小会儿确保 Coordinator 数据已就绪
+        await asyncio.sleep(1.0)
+        
+        is_off = (self.coordinator.data.get("mode") == STATE_OFF)
+        
+        if not is_off:
+            _LOGGER.info("[自检] 设备已处于开机状态，执行标准同步.")
+            await self._async_sync_temp_process()
+            # 设置下次同步时间
+            self._last_target_sync = time.time()
+            return
+
+        _LOGGER.info("[自检] 设备处于【关机】状态，执行【闪电同步】(开->读->关).")
+        
+        # 1. 开机
+        self.coordinator.notify_turned_on() # 告诉 Coordinator 别急着报 OFF
+        if not await self._controller.async_toggle_power():
+            _LOGGER.error("[自检] 开机失败，终止.")
+            return
+            
+        # 2. 等待 OCR 稳定 (2.5s)
+        _LOGGER.info(f"[自检] 等待 {SYNC_WAIT_TIME}秒...")
+        await asyncio.sleep(SYNC_WAIT_TIME)
+        
+        # 3. 快速读取 (无需激活，因为开机默认会显示温度)
+        # 如果开机不显示 Setting 模式，可能需要激活，这里假设开机能看到温度
+        # 为了保险，发一次激活也没关系 (State是ON了)
+        await self._controller.async_adjust_temperature(0, need_activation=True)
+        await asyncio.sleep(1.0) # 再等一下激活菜单
+        
+        real_temp = await self._read_reliable_temp(expected_hint=self._attr_target_temperature, sample_count=2)
+        
+        if real_temp is not None:
+            _LOGGER.info(f"[自检] 读取成功: {real_temp}°C. 更新 HA.")
+            self._attr_target_temperature = real_temp
+            self.async_write_ha_state()
+        else:
+            _LOGGER.warning("[自检] 读取失败.")
+
+        # 4. 关机
+        _LOGGER.info("[自检] 执行关机...")
+        await self._controller.async_toggle_power()
+        self._display_mode = STATE_OFF
+        self.async_write_ha_state()
+        
+        # 设置时间，避免马上又触发定时同步
+        self._last_target_sync = time.time()
+        _LOGGER.info("[自检] 完成.")
 
     async def _async_sync_temp_process(self):
         """定时同步任务."""
@@ -350,14 +418,15 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
                 _LOGGER.warning("[同步] 读取失败，跳过更新.")
 
         except asyncio.CancelledError:
-            _LOGGER.info("[同步] 任务被取消 (用户插入了手动操作).")
+            _LOGGER.info("[同步] 任务被取消.")
         except Exception as e:
             _LOGGER.error(f"[同步] 异常: {e}")
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        _LOGGER.info("[实体] 请求: 开机 (Turn On)")
+        _LOGGER.info("[实体] 请求: 开机")
         if self._adjust_task and not self._adjust_task.done(): self._adjust_task.cancel()
         if self._sync_task and not self._sync_task.done(): self._sync_task.cancel()
+        if self._startup_task and not self._startup_task.done(): self._startup_task.cancel()
             
         self.coordinator.notify_turned_on()
         prev_mode = self._display_mode
@@ -366,14 +435,15 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
 
         success = await self._controller.async_toggle_power()
         if not success:
-            _LOGGER.error("[实体] 开机失败，回滚状态")
+            _LOGGER.error("[实体] 开机失败，回滚")
             self._display_mode = prev_mode
             self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        _LOGGER.info("[实体] 请求: 关机 (Turn Off)")
+        _LOGGER.info("[实体] 请求: 关机")
         if self._adjust_task and not self._adjust_task.done(): self._adjust_task.cancel()
         if self._sync_task and not self._sync_task.done(): self._sync_task.cancel()
+        if self._startup_task and not self._startup_task.done(): self._startup_task.cancel()
 
         prev_mode = self._display_mode
         self._display_mode = STATE_OFF
@@ -381,14 +451,15 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
 
         success = await self._controller.async_toggle_power()
         if not success:
-            _LOGGER.error("[实体] 关机失败，回滚状态")
+            _LOGGER.error("[实体] 关机失败，回滚")
             self._display_mode = prev_mode
             self.async_write_ha_state()
 
     async def async_set_operation_mode(self, operation_mode: str) -> None:
-        _LOGGER.info(f"[实体] 请求: 设置运行模式为 {operation_mode}")
+        _LOGGER.info(f"[实体] 请求: 设置模式 {operation_mode}")
         if self._adjust_task and not self._adjust_task.done(): self._adjust_task.cancel()
         if self._sync_task and not self._sync_task.done(): self._sync_task.cancel()
+        if self._startup_task and not self._startup_task.done(): self._startup_task.cancel()
 
         if operation_mode == STATE_OFF:
             await self.async_turn_off()
@@ -397,7 +468,7 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
         old_mode = self._display_mode
 
         if self._display_mode == STATE_OFF:
-            _LOGGER.info("[实体] 设备处于关机状态，先开机...")
+            _LOGGER.info("[实体] 设备关机中，先开机...")
             self.coordinator.notify_turned_on()
             self._display_mode = MODE_LOW_POWER
             self.async_write_ha_state()
@@ -443,34 +514,36 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
         self._last_active_time = time.time()
         self.async_write_ha_state()
         
-        _LOGGER.info(f"[实体] 收到新目标温度: {new_target} (旧目标: {old_target})")
+        _LOGGER.info(f"[实体] 收到新目标温度: {new_target}")
 
         if self._adjust_task and not self._adjust_task.done():
-            _LOGGER.warning("[实体] !!! 发现正在进行的调节任务，立即取消 !!!")
+            _LOGGER.warning("[实体] 取消旧调节任务")
             self._adjust_task.cancel()
         
         if self._sync_task and not self._sync_task.done():
-            _LOGGER.warning("[实体] 发现正在进行的同步任务，立即取消")
+            _LOGGER.warning("[实体] 取消同步任务")
             self._sync_task.cancel()
+
+        if self._startup_task and not self._startup_task.done():
+            _LOGGER.warning("[实体] 取消启动自检")
+            self._startup_task.cancel()
 
         self._adjust_task = self.hass.async_create_task(
             self._async_adjust_temp_process(new_target, old_target)
         )
 
     async def _async_adjust_temp_process(self, new_target: float, old_target_backup: float):
-        """实际执行温度调节的逻辑 (可被取消)."""
         try:
-            _LOGGER.info(f"[任务] === 开始执行调节: -> {new_target} ===")
+            _LOGGER.info(f"[任务] === 开始调节: -> {new_target} ===")
 
-            # --- 步骤 1: 激活 / 唤醒 ---
             activated_successfully = False
             raw_mode = self.coordinator.data.get("mode") if self.coordinator.data else MODE_STANDBY
             
             if raw_mode == MODE_SETTING:
-                _LOGGER.info("[任务] 检测到设备已在 Setting 模式，跳过激活.")
+                _LOGGER.info("[任务] 已在 Setting 模式，跳过激活.")
                 activated_successfully = True
             else:
-                 _LOGGER.info(f"[任务] 设备当前模式: {raw_mode}，执行激活(UP)...")
+                 _LOGGER.info(f"[任务] 激活(UP)...")
                  if raw_mode == MODE_STANDBY:
                      await self._controller.async_screen_on()
                      await asyncio.sleep(0.8)
@@ -478,41 +551,38 @@ class OCRWaterHeaterEntity(CoordinatorEntity[OCRCoordinator], WaterHeaterEntity)
                  activated_successfully = await self._controller.async_adjust_temperature(0, need_activation=True)
 
             if not activated_successfully and raw_mode != MODE_SETTING:
-                _LOGGER.error("[任务] 激活失败，停止.")
+                _LOGGER.error("[任务] 激活失败.")
                 self._attr_target_temperature = old_target_backup
                 self.async_write_ha_state()
                 return
 
-            # --- 步骤 2: 等待同步 ---
-            _LOGGER.info(f"[任务] 等待 {SYNC_WAIT_TIME}秒 同步画面...")
+            _LOGGER.info(f"[任务] 等待 {SYNC_WAIT_TIME}秒...")
             await asyncio.sleep(SYNC_WAIT_TIME)
 
-            # --- 步骤 3: 可靠读取 & 计算 ---
             start_temp = await self._read_reliable_temp(expected_hint=old_target_backup)
 
             if start_temp is None:
-                _LOGGER.warning("[任务] 无法可靠读取温度，使用HA旧记录值作为基准.")
+                _LOGGER.warning("[任务] 读取失败，使用旧值.")
                 start_temp = old_target_backup
             else:
-                 _LOGGER.info(f"[任务] 基准温度确认: {start_temp}°C")
+                 _LOGGER.info(f"[任务] 基准: {start_temp}°C")
 
             steps = int(new_target - start_temp)
-            _LOGGER.info(f"[任务] 计算: {new_target} - {start_temp} = {steps} 步")
+            _LOGGER.info(f"[任务] 计算: {steps} 步")
             
-            # --- 步骤 4: 发送 ---
             if steps != 0:
                 success = await self._controller.async_adjust_temperature(steps, need_activation=False)
                 if success:
-                    _LOGGER.info("[任务] 调节完成.")
+                    _LOGGER.info("[任务] 完成.")
                 else:
-                    _LOGGER.error("[任务] 调节指令发送失败.")
+                    _LOGGER.error("[任务] 指令失败.")
                     self._attr_target_temperature = old_target_backup
                     self.async_write_ha_state()
             else:
                 _LOGGER.info("[任务] 无需调节.")
 
         except asyncio.CancelledError:
-            _LOGGER.warning(f"[任务] 调节任务被取消 (目标: {new_target}). 停止发送指令.")
+            _LOGGER.warning(f"[任务] 被取消.")
             raise 
         except Exception as e:
-            _LOGGER.error(f"[任务] 执行异常: {e}")
+            _LOGGER.error(f"[任务] 异常: {e}")

@@ -118,7 +118,7 @@ class ModeProcessor:
             # A. OCR 区域检查
             rel_ocr = self._get_relative_roi(self.ocr_roi)
             ocr_ratio = self._analyze_roi_local(enhanced_panel, rel_ocr, "OCR", debug_imgs)
-            _LOGGER.info(f"DEBUG: OCR_Ratio={ocr_ratio:.3f}, Limit=0.10")
+            _LOGGER.debug(f"DEBUG: OCR_Ratio={ocr_ratio:.3f}, Limit=0.10")
             if ocr_ratio < 0.10:
                 _LOGGER.warning(f"DEBUG: OCR check failed. Returns STANDBY.")
                 return MODE_STANDBY, debug_imgs
@@ -133,8 +133,8 @@ class ModeProcessor:
             for mode_key in ['low', 'half', 'full']:
                 rel = self._get_relative_roi(self.sub_rois[mode_key])
                 scores[mode_key] = self._analyze_roi_local(enhanced_panel, rel, f"Mode_{mode_key}", debug_imgs)
-            _LOGGER.info(f"DEBUG: Scores: {scores}, Threshold={MODE_ACTIVE_RATIO}")    
-                
+            _LOGGER.debug(f"DEBUG: Scores: {scores}, Threshold={MODE_ACTIVE_RATIO}")    
+
             best_mode = max(scores, key=scores.get)
             if scores[best_mode] > MODE_ACTIVE_RATIO:
                 if best_mode == 'low': return MODE_LOW_POWER, debug_imgs
