@@ -31,13 +31,13 @@ DEFAULT_UPDATE_INTERVAL = 1000
 DEFAULT_DEBUG_MODE = False
 
 # === 图像处理核心参数 (基于你的测试结果优化) ===
-# 1. 对比度增强系数 (1.5 - 2.5 均可，推荐 2.0)
+# 1. 对比度增强系数 (1.5 - 2.5 均可，推荐 2.0) G+L 1.5+40 2.5+10 2+20
 DEFAULT_GAMMA = 2.0 
 
 # 2. 局部亮度底噪门限 (0-255)
 # 在 Gamma 增强后，如果一个图标区域内的最大亮度低于此值，直接视为灭
 # 你的测试表明 20-40 都是 2.0 的好区间，选 30 比较稳
-DEFAULT_NOISE_LIMIT = 30
+DEFAULT_NOISE_LIMIT = 20
 
 # === 配置键 ===
 CONF_IMAGE_URL = "image_url"
@@ -101,3 +101,10 @@ CMD_VAL_TOGGLE = ["00000c00d0135500012100040ED8010010390016001500160040010004015
 
 # IR Command for Mode Switching (Low -> Half -> Full loop)
 CMD_VAL_MODE = ["FE00000000000094701fff790107002427ec003600AB00E001C403850F9C1388430000000101000100010101000001000100010000000000000100010101010101054206F4"]
+# 待机模式下的保活(防息屏)间隔 (秒)
+# 建议设置为 30-50 秒，取决于热水器自动息屏的时间
+SCREEN_KEEP_ALIVE_INTERVAL = 40
+
+# 目标温度同步间隔 (秒)
+# 每隔多久自动“激活”一次设置菜单，读取真实目标温度并同步到HA
+TARGET_TEMP_SYNC_INTERVAL = 600

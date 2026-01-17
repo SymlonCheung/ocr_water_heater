@@ -12,7 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 class ModeProcessor:
     """
     使用局部 Otsu + Gamma 增强 + 动态底噪门限。
-    配置基于 Grid Search 调优结果：Gamma 2.0 / Limit 30
+    配置基于 Grid Search 调优结果：Gamma 2.0 / Limit 20
     """
 
     def __init__(self):
@@ -64,7 +64,7 @@ class ModeProcessor:
         roi_gray = gray_panel[y:y+h, x:x+w]
         if roi_gray.size == 0: return 0.0
 
-        # 2. 局部亮度检查 (使用 const 中的配置值 30)
+        # 2. 局部亮度检查 (使用 const 中的配置值 20)
         max_val = np.max(roi_gray)
         if max_val < DEFAULT_NOISE_LIMIT: 
             return 0.0
@@ -118,8 +118,9 @@ class ModeProcessor:
             # A. OCR 区域检查
             rel_ocr = self._get_relative_roi(self.ocr_roi)
             ocr_ratio = self._analyze_roi_local(enhanced_panel, rel_ocr, "OCR", debug_imgs)
-            
+            _LOGGER.info(f"DEBUG: OCR_Ratio={ocr_ratio:.3f}, Limit=0.10")
             if ocr_ratio < 0.10:
+                _LOGGER.warning(f"DEBUG: OCR check failed. Returns STANDBY.")
                 return MODE_STANDBY, debug_imgs
 
             # B. 正在设置
@@ -132,7 +133,8 @@ class ModeProcessor:
             for mode_key in ['low', 'half', 'full']:
                 rel = self._get_relative_roi(self.sub_rois[mode_key])
                 scores[mode_key] = self._analyze_roi_local(enhanced_panel, rel, f"Mode_{mode_key}", debug_imgs)
-
+            _LOGGER.info(f"DEBUG: Scores: {scores}, Threshold={MODE_ACTIVE_RATIO}")    
+                
             best_mode = max(scores, key=scores.get)
             if scores[best_mode] > MODE_ACTIVE_RATIO:
                 if best_mode == 'low': return MODE_LOW_POWER, debug_imgs
