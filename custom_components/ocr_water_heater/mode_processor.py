@@ -1,7 +1,9 @@
-"""Mode Processing logic for OCR Water Heater (Final Optimized)."""
+"""Mode Processing logic for OCR Water Heater (PIL/Numpy Version)."""
 import logging
-import cv2
+import io
 import numpy as np
+from PIL import Image, ImageOps
+
 from .const import (
     MODE_LOW_POWER, MODE_HALF, MODE_FULL, MODE_SETTING, MODE_STANDBY,
     MODE_ACTIVE_RATIO, DEFAULT_ROI_PANEL, DEFAULT_GAMMA, DEFAULT_NOISE_LIMIT
@@ -11,8 +13,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class ModeProcessor:
     """
-    使用局部 Otsu + Gamma 增强 + 动态底噪门限。
-    配置基于 Grid Search 调优结果：Gamma 2.0 / Limit 20
+    使用局部 Otsu + Gamma 增强 + 动态底噪门限 (PIL Version).
     """
 
     def __init__(self):
@@ -39,46 +40,71 @@ class ModeProcessor:
         
         return (rx, ry, rw, rh)
 
-    def _enhance_contrast(self, image):
+    def _enhance_contrast(self, image_pil):
         """Gamma 增强"""
-        img_float = image.astype(float)
-        min_val = np.min(img_float)
-        max_val = np.max(img_float)
+        img_arr = np.array(image_pil, dtype=float)
+        min_val = np.min(img_arr)
+        max_val = np.max(img_arr)
         
         if max_val - min_val < 5:
-            return image
+            return image_pil 
             
-        img_norm = (img_float - min_val) / (max_val - min_val) * 255.0
+        img_norm = (img_arr - min_val) / (max_val - min_val) * 255.0
         img_gamma = np.power(img_norm / 255.0, self.gamma) * 255.0
         
-        return img_gamma.astype(np.uint8)
+        return Image.fromarray(img_gamma.astype(np.uint8))
 
-    def _analyze_roi_local(self, gray_panel, rel_roi, debug_name, debug_store):
-        """
-        局部二值化分析
-        """
+    def _get_otsu_threshold(self, img_pil):
+        """手动实现 Otsu 阈值"""
+        if img_pil.mode != 'L':
+            img_pil = img_pil.convert('L')
+            
+        hist = img_pil.histogram()
+        total = sum(hist)
+        current_max, threshold = 0, 0
+        sum_total, sum_foreground, weight_background, weight_foreground = 0, 0, 0, 0
+
+        for i in range(256):
+            sum_total += i * hist[i]
+
+        for i in range(256):
+            weight_background += hist[i]
+            if weight_background == 0: continue
+            weight_foreground = total - weight_background
+            if weight_foreground == 0: break
+
+            sum_foreground += i * hist[i]
+            mean_bg = sum_foreground / weight_background
+            mean_fg = (sum_total - sum_foreground) / weight_foreground
+            between_class_variance = weight_background * weight_foreground * ((mean_bg - mean_fg) ** 2)
+            
+            if between_class_variance > current_max:
+                current_max = between_class_variance
+                threshold = i
+        return threshold
+
+    def _analyze_roi_local(self, gray_panel_pil, rel_roi, debug_name, debug_store):
+        """局部二值化分析"""
         x, y, w, h = rel_roi
         if w <= 0 or h <= 0: return 0.0
         
-        # 1. 切割局部灰度图
-        roi_gray = gray_panel[y:y+h, x:x+w]
-        if roi_gray.size == 0: return 0.0
+        roi_img = gray_panel_pil.crop((x, y, x + w, y + h))
+        roi_arr = np.array(roi_img)
+        if roi_arr.size == 0: return 0.0
 
-        # 2. 局部亮度检查 (使用 const 中的配置值 20)
-        max_val = np.max(roi_gray)
+        max_val = np.max(roi_arr)
         if max_val < DEFAULT_NOISE_LIMIT: 
             return 0.0
 
-        # 3. 局部 Otsu 二值化
-        thresh_val, roi_binary = cv2.threshold(
-            roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
+        thresh_val = self._get_otsu_threshold(roi_img)
+        roi_binary = roi_img.point(lambda p: 255 if p > thresh_val else 0)
         
         debug_store[f"05_{debug_name}_Bin_{int(thresh_val)}.jpg"] = roi_binary
 
-        # 4. 计算比例
-        lit_pixels = cv2.countNonZero(roi_binary)
-        return lit_pixels / roi_binary.size
+        bin_arr = np.array(roi_binary)
+        lit_pixels = np.count_nonzero(bin_arr == 255)
+        
+        return lit_pixels / bin_arr.size
 
     def process(self, image_bytes):
         debug_imgs = {}
@@ -86,61 +112,66 @@ class ModeProcessor:
             return None, debug_imgs
 
         try:
-            # 1. 解码
-            image_array = np.asarray(bytearray(image_bytes), dtype=np.uint8)
-            img_origin = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-            if img_origin is None: return None, debug_imgs
-
-            # 2. 裁剪面板
-            px, py, pw, ph = self.panel_roi
-            h_orig, w_orig = img_origin.shape[:2]
-            px = max(0, min(px, w_orig))
-            py = max(0, min(py, h_orig))
-            pw = min(pw, w_orig - px)
-            ph = min(ph, h_orig - py)
+            img_origin = Image.open(io.BytesIO(image_bytes))
             
-            panel_img = img_origin[py:py+ph, px:px+pw]
-            if panel_img.size == 0: return MODE_STANDBY, debug_imgs
-
+            # 裁剪面板
+            px, py, pw, ph = self.panel_roi
+            w_orig, h_orig = img_origin.size
+            left = max(0, min(px, w_orig))
+            top = max(0, min(py, h_orig))
+            right = min(left + pw, w_orig)
+            bottom = min(top + ph, h_orig)
+            
+            if right - left <= 0 or bottom - top <= 0:
+                return MODE_STANDBY, debug_imgs
+                
+            panel_img = img_origin.crop((left, top, right, bottom))
             debug_imgs["01_Panel.jpg"] = panel_img
 
-            # 3. 转灰度 & Gamma 增强
-            gray_panel = cv2.cvtColor(panel_img, cv2.COLOR_BGR2GRAY)
+            # 增强
+            gray_panel = panel_img.convert("L")
             enhanced_panel = self._enhance_contrast(gray_panel)
             debug_imgs[f"02_Enhanced_G{self.gamma}.jpg"] = enhanced_panel
 
-            # 4. 全局亮度初筛 (防止全黑死机)
-            if np.max(enhanced_panel) < DEFAULT_NOISE_LIMIT:
+            # 全局亮度初筛
+            if np.max(np.array(enhanced_panel)) < DEFAULT_NOISE_LIMIT:
                 return MODE_STANDBY, debug_imgs
 
-            # 5. 逐个区域进行【局部】分析
-            
-            # A. OCR 区域检查
+            # === A. OCR 区域安全检查 ===
             rel_ocr = self._get_relative_roi(self.ocr_roi)
             ocr_ratio = self._analyze_roi_local(enhanced_panel, rel_ocr, "OCR", debug_imgs)
-            _LOGGER.debug(f"DEBUG: OCR_Ratio={ocr_ratio:.3f}, Limit=0.10")
             if ocr_ratio < 0.10:
-                _LOGGER.warning(f"DEBUG: OCR check failed. Returns STANDBY.")
                 return MODE_STANDBY, debug_imgs
 
-            # B. 正在设置
+            # === B. 优先检查：正在设置 ===
+            # "正在设置"通常比较特殊，如果它亮了，通常意味着其他模式的图标可能也会受到干扰
+            # 但你的逻辑是 Setting 优先，这没问题
             rel_set = self._get_relative_roi(self.sub_rois['setting'])
-            if self._analyze_roi_local(enhanced_panel, rel_set, "SET", debug_imgs) > MODE_ACTIVE_RATIO:
+            set_score = self._analyze_roi_local(enhanced_panel, rel_set, "SET", debug_imgs)
+            if set_score > MODE_ACTIVE_RATIO:
                 return MODE_SETTING, debug_imgs
 
-            # C. 互斥模式
+            # === C. 互斥模式 (核心修改) ===
+            # 这里是关键！我们计算所有模式的分数，取最高分，而不是按顺序 if
             scores = {}
             for mode_key in ['low', 'half', 'full']:
                 rel = self._get_relative_roi(self.sub_rois[mode_key])
                 scores[mode_key] = self._analyze_roi_local(enhanced_panel, rel, f"Mode_{mode_key}", debug_imgs)
-            _LOGGER.debug(f"DEBUG: Scores: {scores}, Threshold={MODE_ACTIVE_RATIO}")    
+            
+            # 在日志里打印分数，方便以后排查 (Low: 0.32, Half: 0.44 -> Winner: Half)
+            _LOGGER.debug(f"Mode Scores: {scores}")
 
+            # 1. 找出分数最高的模式
             best_mode = max(scores, key=scores.get)
-            if scores[best_mode] > MODE_ACTIVE_RATIO:
+            best_score = scores[best_mode]
+
+            # 2. 判断最高分是否达标
+            if best_score > MODE_ACTIVE_RATIO:
                 if best_mode == 'low': return MODE_LOW_POWER, debug_imgs
                 if best_mode == 'half': return MODE_HALF, debug_imgs
                 if best_mode == 'full': return MODE_FULL, debug_imgs
 
+            # 3. 都不达标 -> 待机
             return MODE_STANDBY, debug_imgs
 
         except Exception as e:

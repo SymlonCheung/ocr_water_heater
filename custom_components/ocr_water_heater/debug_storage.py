@@ -1,19 +1,19 @@
-"""Handles debug image storage for OCR Water Heater."""
+"""Handles debug image storage for OCR Water Heater (PIL Version)."""
 import os
 import time
 import logging
-import cv2
+from PIL import Image
 from .const import DEBUG_DIR_ROOT
 
 _LOGGER = logging.getLogger(__name__)
 
 def save_debug_record(result: str | int | None, images: dict[str, any]):
     """
-    保存 OCR 调试记录到文件夹。
+    保存 OCR 调试记录到文件夹 (使用 PIL)。
     
     Args:
         result: OCR 识别结果 (int 或 None)
-        images: 字典 {"filename.jpg": numpy_image_array}
+        images: 字典 {"filename.jpg": PIL.Image 对象}
     """
     if not images:
         return
@@ -31,10 +31,17 @@ def save_debug_record(result: str | int | None, images: dict[str, any]):
             os.makedirs(save_dir, exist_ok=True)
 
         # 3. 遍历字典保存图片
-        for filename, img_array in images.items():
-            if img_array is not None:
+        for filename, img_obj in images.items():
+            if img_obj is not None:
                 file_path = os.path.join(save_dir, filename)
-                cv2.imwrite(file_path, img_array)
+                try:
+                    # 确保是 PIL Image 对象
+                    if isinstance(img_obj, Image.Image):
+                        img_obj.save(file_path, quality=95)
+                    else:
+                        _LOGGER.warning(f"Skipping {filename}: Not a PIL Image object.")
+                except Exception as save_err:
+                    _LOGGER.error(f"Error saving {filename}: {save_err}")
                 
     except Exception as e:
         _LOGGER.error(f"Failed to save debug record: {e}")

@@ -1,185 +1,225 @@
-"""OCR Processing logic (Simplified)."""
+"""OCR Processing logic (No-OpenCV / PIL Version)."""
 import logging
-import cv2
+import io
 import numpy as np
-import PIL.Image
-import ddddocr
+from PIL import Image, ImageOps, ImageDraw
+
 from .const import (
-    RESIZE_FACTOR, SIDE_CROP_PIXELS, UNSHARP_AMOUNT, VALID_MIN, VALID_MAX,
-    MODE_A_SMART_SLIM, MODE_A_SLIM_THRESHOLD, MODE_A_FORCE_ERODE,
-    CHAR_REPLACE_MAP, DEFAULT_ROI, DEFAULT_SKEW,
-    OCR_MIN_PEAK_BRIGHTNESS  # <--- 新增常量
+    DEFAULT_ROI, DEFAULT_SKEW,
+    OCR_MIN_PEAK_BRIGHTNESS,
+    VALID_MIN, VALID_MAX,
+    DEBUG_DIR_ROOT
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-if not hasattr(PIL.Image, 'ANTIALIAS'):
-    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+# === 核心配置 (移植自调试脚本) ===
+# 判定阈值：黑色像素占比 >= 50% 视为笔画存在
+ACTIVE_RATIO = 0.50
+# 笔画检测区域大小 (宽, 高)
+SEGMENT_SIZE = (2, 2)
+
+# 七段数码管逻辑映射表
+# 顺序: a, b, c, d, e, f, g
+# 1=黑(有笔画), 0=白(无笔画)
+SEGMENT_MAP = {
+    (1, 1, 1, 1, 1, 1, 0): 0, 
+    (0, 1, 1, 0, 0, 0, 0): 1, 
+    (1, 1, 0, 1, 1, 0, 1): 2,
+    (1, 1, 1, 1, 0, 0, 1): 3, 
+    (0, 1, 1, 0, 0, 1, 1): 4, 
+    (1, 0, 1, 1, 0, 1, 1): 5,
+    (1, 0, 1, 1, 1, 1, 1): 6, 
+    (1, 1, 1, 0, 0, 0, 0): 7, 
+    (1, 1, 1, 1, 1, 1, 1): 8,
+    (1, 1, 1, 1, 0, 1, 1): 9, 
+    (0, 0, 0, 0, 0, 0, 0): None
+}
+
+# 局部坐标定义
+# 基于调试脚本中的全局坐标 (769, 339) 计算得出的相对偏移量
+# 例如 a1(780, 344) - Origin(769, 339) = (11, 5)
+LOCAL_SEGMENTS = {
+    # 左侧数字 (十位)
+    'a1': (11, 5),  'b1': (15, 8),  'c1': (13, 16),
+    'd1': (8, 20),  'e1': (3, 16),  'f1': (5, 8),   'g1': (9, 12),
+    # 右侧数字 (个位)
+    'a0': (27, 5),  'b0': (31, 8),  'c0': (29, 15),
+    'd0': (24, 19), 'e0': (20, 15), 'f0': (21, 8),  'g0': (25, 11)
+}
+
 
 class OCRProcessor:
-    """Class to handle OCR logic only."""
+    """Class to handle OCR logic using PIL only (No OpenCV)."""
 
     def __init__(self):
-        self._ocr_engine = None
         self._roi = DEFAULT_ROI
         self._skew = DEFAULT_SKEW
-        self._init_engine()
 
     def configure(self, roi, skew):
         """Update parameters."""
         self._roi = roi
         self._skew = skew
 
-    def _init_engine(self):
-        try:
-            try:
-                self._ocr_engine = ddddocr.DdddOcr(show_ad=False)
-            except TypeError:
-                self._ocr_engine = ddddocr.DdddOcr()
-            self._ocr_engine.set_ranges("0123456789")
-        except Exception as e:
-            _LOGGER.error("Failed to initialize ddddocr: %s", e)
+    def _get_otsu_threshold(self, img_gray):
+        """
+        手动实现 Otsu 阈值算法 (替代 cv2.threshold)
+        """
+        hist = img_gray.histogram()
+        total = sum(hist)
+        current_max, threshold = 0, 0
+        sum_total, sum_foreground, weight_background, weight_foreground = 0, 0, 0, 0
 
-    def _unsharp_mask(self, image, amount=1.5):
-        blurred = cv2.GaussianBlur(image, (5, 5), 1.0)
-        sharpened = float(amount + 1) * image - float(amount) * blurred
-        sharpened = np.maximum(sharpened, 0)
-        sharpened = np.minimum(sharpened, 255)
-        return sharpened.astype(np.uint8)
+        for i in range(256):
+            sum_total += i * hist[i]
 
-    def _clean_ocr_text(self, raw_text):
-        raw_text = raw_text.strip()
-        clean = ""
-        for char in raw_text:
-            if char in CHAR_REPLACE_MAP:
-                clean += CHAR_REPLACE_MAP[char]
-            elif char.isdigit():
-                clean += char
-        return clean
+        for i in range(256):
+            weight_background += hist[i]
+            if weight_background == 0: continue
+            weight_foreground = total - weight_background
+            if weight_foreground == 0: break
 
-    def _dddd_ocr_core(self, image):
-        try:
-            _, buf = cv2.imencode(".jpg", image)
-            bytes_img = buf.tobytes()
-            res = self._ocr_engine.classification(bytes_img, probability=True)
-            txt = ""
-            for prob in res['probability']:
-                txt += res['charsets'][prob.index(max(prob))]
-            return txt
-        except Exception:
-            return ""
+            sum_foreground += i * hist[i]
+            
+            mean_bg = sum_foreground / weight_background
+            mean_fg = (sum_total - sum_foreground) / weight_foreground
+            
+            between_class_variance = weight_background * weight_foreground * ((mean_bg - mean_fg) ** 2)
+            
+            if between_class_variance > current_max:
+                current_max = between_class_variance
+                threshold = i
 
-    def _preprocess_base(self, image, debug_store):
-        x, y, w, h = self._roi
-        h_img, w_img = image.shape[:2]
-        
-        # ROI Crop
-        roi = image[max(0, y):min(h_img, y+h), max(0, x):min(w_img, x+w)]
-        if roi.size == 0:
-            return None
-        
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-        # Skew Correction
-        if self._skew != 0:
-            rows, cols = gray.shape
-            theta = np.deg2rad(self._skew)
-            M = np.float32([[1, np.tan(theta), 0], [0, 1, 0]])
-            new_width = int(cols + rows * np.abs(np.tan(theta)))
-            gray = cv2.warpAffine(gray, M, (new_width, rows), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-
-        # Resize
-        new_dim = (int(gray.shape[1] * RESIZE_FACTOR), int(gray.shape[0] * RESIZE_FACTOR))
-        gray = cv2.resize(gray, new_dim, interpolation=cv2.INTER_CUBIC)
-
-        # Side Crop
-        if SIDE_CROP_PIXELS > 0 and gray.shape[1] > 2 * SIDE_CROP_PIXELS:
-            gray = gray[:, SIDE_CROP_PIXELS : -SIDE_CROP_PIXELS]
-
-        # Sharpen
-        gray = self._unsharp_mask(gray, amount=UNSHARP_AMOUNT)
-        debug_store["00_Base.jpg"] = gray
-        return gray
+        return threshold
 
     def process_image(self, img_bytes):
         """
-        Main function. Processes image using single-pass OCR.
+        Main function. Processes image using PIL and Heuristic Segment Analysis.
+        Returns: (int_value, debug_imgs_dict)
         """
         debug_imgs = {}
         if not img_bytes:
             return None, debug_imgs
 
         try:
-            image_array = np.asarray(bytearray(img_bytes), dtype=np.uint8)
-            img_origin = cv2.imdecode(image_array, -1)
-        except Exception:
+            # 1. 打开图片
+            full_img = Image.open(io.BytesIO(img_bytes))
+        except Exception as e:
+            _LOGGER.error(f"Failed to open image: {e}")
             return None, debug_imgs
 
-        if img_origin is None:
-            return None, debug_imgs
-
-        # 1. 预处理
-        gray_base = self._preprocess_base(img_origin, debug_imgs)
-        if gray_base is None:
-            return None, debug_imgs
-
-        # === 核心修改：增加亮度检查防止误识别噪声 ===
-        # LED 数字通常非常亮 (接近 255)。
-        # 如果 ROI 区域内的最大亮度都很低 (例如低于 80)，说明屏幕是黑的。
-        # 这种情况下继续二值化会把背景噪声放大成随机字符 (如 'A'->'4' 或 '1')。
-        peak_brightness = np.max(gray_base)
-        if peak_brightness < OCR_MIN_PEAK_BRIGHTNESS:
-            _LOGGER.debug("Skipping OCR: Peak brightness %s < %s (Screen likely OFF)", 
-                          peak_brightness, OCR_MIN_PEAK_BRIGHTNESS)
-            # 可以在 Debug 图片中保存一下，方便排查
-            debug_imgs["00_Skipped_Dark.jpg"] = gray_base
-            return None, debug_imgs
-        # ==========================================
-
-        # 2. 图像增强 (Gamma & Otsu Binary)
-        gamma = 1.5
-        invGamma = 1.0 / gamma
-        table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-        gray_proc = cv2.LUT(gray_base, table)
+        # 2. 裁剪 ROI
+        # self._roi 格式为 (x, y, w, h)
+        rx, ry, rw, rh = self._roi
+        # PIL crop 需要 (left, top, right, bottom)
+        crop_box = (rx, ry, rx + rw, ry + rh)
         
-        _, binary = cv2.threshold(gray_proc, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        try:
+            # 转换为灰度图 'L'
+            ocr_img = full_img.crop(crop_box).convert("L")
+            debug_imgs["01_Crop_Gray.jpg"] = ocr_img
+        except Exception as e:
+            _LOGGER.error(f"Crop failed: {e}")
+            return None, debug_imgs
+
+        # 3. 亮度检查 (防止黑屏噪音)
+        np_img = np.array(ocr_img)
+        max_val = np.max(np_img) if np_img.size > 0 else 0
         
-        # 确保背景为白色 (ddddocr 识别习惯)
-        if cv2.countNonZero(binary) < (binary.size * 0.5):
-            binary = cv2.bitwise_not(binary)
+        if max_val < OCR_MIN_PEAK_BRIGHTNESS:
+            _LOGGER.debug(f"Skipping OCR: Image too dark (Max:{max_val})")
+            debug_imgs["00_Skipped_Dark.jpg"] = ocr_img
+            return None, debug_imgs
 
-        # 3. 细化处理 (Slimming logic)
-        black_ratio = (binary.size - cv2.countNonZero(binary)) / binary.size
-        iterations = 0
-        if MODE_A_FORCE_ERODE:
-            iterations = 1
-        elif MODE_A_SMART_SLIM and black_ratio > MODE_A_SLIM_THRESHOLD:
-            excess = (black_ratio - MODE_A_SLIM_THRESHOLD) / (0.5 - MODE_A_SLIM_THRESHOLD)
-            iterations = int(np.clip(round(excess * 2), 1, 2))
+        # 4. Otsu 二值化
+        thresh_val = self._get_otsu_threshold(ocr_img)
+        # point: >阈值变255(白), <阈值变0(黑)
+        binary_img = ocr_img.point(lambda p: 255 if p > thresh_val else 0)
+        
+        # 5. 背景统一 (确保白底黑字)
+        # 统计白色像素
+        np_bin = np.array(binary_img)
+        white_pixels = np.count_nonzero(np_bin == 255)
+        total_pixels = np_bin.size
+        
+        # 如果白色少于一半，说明背景是黑的(字是白的)，需要反转
+        if white_pixels < (total_pixels * 0.5):
+            binary_img = ImageOps.invert(binary_img)
+            np_bin = np.array(binary_img) # 更新 numpy 数组
 
-        if iterations > 0:
-            kernel = np.ones((2, 2), np.uint8)
-            eroded = cv2.erode(binary, kernel, iterations=iterations)
-            # 简单的连通域面积检查，防止腐蚀过度
-            cnts, _ = cv2.findContours(cv2.bitwise_not(eroded), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if cnts:
-                binary = eroded
+        # 6. 识别逻辑 (七段数码管扫描)
+        # 转为 RGB 用于在 debug 图上画框
+        canvas = binary_img.convert("RGB")
+        draw = ImageDraw.Draw(canvas)
+        
+        digits_result = {}
+        seg_order = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+        
+        # 遍历两个数字位: '1' (十位), '0' (个位)
+        for pos in ['1', '0']:
+            states = []
+            for seg in seg_order:
+                key = f"{seg}{pos}"
+                # 获取局部坐标 (相对于 ROI 左上角)
+                lx, ly = LOCAL_SEGMENTS.get(key, (0, 0))
+                sw, sh = SEGMENT_SIZE
+                
+                # 边界安全检查
+                if lx < 0 or ly < 0 or lx + sw > rw or ly + sh > rh:
+                    states.append(0) # 越界视为无笔画
+                    continue
+                
+                # 提取区域像素 (Numpy 切片 [row, col] -> [y, x])
+                zone = np_bin[ly : ly + sh, lx : lx + sw]
+                
+                # 计算黑色像素 (值=0) 的比例
+                zone_total = zone.size
+                zone_white = np.count_nonzero(zone == 255)
+                zone_black = zone_total - zone_white
+                
+                ratio = zone_black / zone_total if zone_total > 0 else 0
+                
+                # 判定: 黑色足够多说明有笔画
+                is_active = 1 if ratio >= ACTIVE_RATIO else 0
+                states.append(is_active)
+                
+                # Debug 绘图: 绿色=Active, 红色=Inactive
+                color = (0, 255, 0) if is_active else (255, 0, 0)
+                draw.rectangle([lx, ly, lx + sw - 1, ly + sh - 1], outline=color)
 
-        # 4. 留白填充 (Padding 提高识别率)
-        binary = cv2.copyMakeBorder(binary, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
-        debug_imgs["01_Final_Binary.jpg"] = binary
+            # 查表获取数字
+            digits_result[pos] = SEGMENT_MAP.get(tuple(states), "?")
 
-        # 5. 执行 OCR
-        raw = self._dddd_ocr_core(binary)
-        clean_res = self._clean_ocr_text(raw)
+        # 7. 结果组装与验证
+        digit_ten = digits_result.get('1', '?')
+        digit_one = digits_result.get('0', '?')
+        
+        res_str = f"{digit_ten}{digit_one}"
+        
+        # 保存带框的识别图供 Debug
+        # 为了清晰，放大 5 倍
+        large_canvas = canvas.resize((rw * 5, rh * 5), resample=Image.NEAREST)
+        draw_large = ImageDraw.Draw(large_canvas)
+        # 简单写一下识别结果
+        # 注意: Home Assistant 容器内可能缺少默认字体，如果报错可移除 text 绘制
+        try:
+            draw_large.text((5, 5), res_str, fill=(0, 255, 255))
+        except IOError:
+            pass # 忽略字体缺失错误
 
-        # 6. 验证结果
-        if clean_res:
-            try:
-                val = int(clean_res)
-                if VALID_MIN <= val <= VALID_MAX:
-                    return val, debug_imgs
-            except ValueError:
-                pass
+        debug_imgs[f"02_Result_{res_str}.jpg"] = large_canvas
 
-        return None, debug_imgs
+        # 转换为整数并验证范围
+        try:
+            if '?' in res_str or 'None' in res_str:
+                _LOGGER.debug(f"OCR Unsure: {res_str}")
+                return None, debug_imgs
+                
+            val = int(res_str)
+            if VALID_MIN <= val <= VALID_MAX:
+                return val, debug_imgs
+            else:
+                _LOGGER.debug(f"OCR Out of Range: {val}")
+                return None, debug_imgs
+        except ValueError:
+            return None, debug_imgs

@@ -32,7 +32,7 @@ _LOGGER = logging.getLogger(__name__)
 def get_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(CONF_IMAGE_URL, default=defaults.get(CONF_IMAGE_URL)): str,
+            vol.Required(CONF_IMAGE_URL, default=defaults.get(CONF_IMAGE_URL, "http://")): str,
             vol.Optional(CONF_MIIO_IP, default=defaults.get(CONF_MIIO_IP, "")): str,
             vol.Optional(CONF_MIIO_TOKEN, default=defaults.get(CONF_MIIO_TOKEN, "")): str,
             vol.Optional(CONF_UPDATE_INTERVAL, default=defaults.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)): vol.All(vol.Coerce(int), vol.Range(min=100)),
@@ -70,7 +70,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
     """Validate the user input allows us to connect."""
     session = aiohttp_client.async_get_clientsession(hass)
     try:
-        async with session.get(data[CONF_IMAGE_URL], timeout=5) as resp:
+        async with session.get(data[CONF_IMAGE_URL], timeout=10) as resp:
             if resp.status != 200:
                 raise ValueError(f"Could not connect, status: {resp.status}")
     except Exception as err:
@@ -90,8 +90,6 @@ class OCRWaterHeaterConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle the initial step."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            # Bronze Requirement: Unique Config Entry
-            # 使用 Image URL 作为唯一标识
             await self.async_set_unique_id(user_input[CONF_IMAGE_URL])
             self._abort_if_unique_id_configured()
 
@@ -101,19 +99,14 @@ class OCRWaterHeaterConfigFlow(ConfigFlow, domain=DOMAIN):
             except Exception:
                 errors["base"] = "cannot_connect"
 
+        # 默认值
         defaults = {
             CONF_IMAGE_URL: "http://192.168.123.86:5000/api/reshuiqi/latest.jpg",
             CONF_MIIO_IP: "",
             CONF_MIIO_TOKEN: "",
             CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
             CONF_DEBUG_MODE: DEFAULT_DEBUG_MODE,
-            CONF_SKEW: DEFAULT_SKEW,
-            
-            CONF_OCR_X: DEFAULT_ROI_OCR[0], CONF_OCR_Y: DEFAULT_ROI_OCR[1], CONF_OCR_W: DEFAULT_ROI_OCR[2], CONF_OCR_H: DEFAULT_ROI_OCR[3],
-            CONF_SET_X: DEFAULT_ROI_SETTING[0], CONF_SET_Y: DEFAULT_ROI_SETTING[1], CONF_SET_W: DEFAULT_ROI_SETTING[2], CONF_SET_H: DEFAULT_ROI_SETTING[3],
-            CONF_LOW_X: DEFAULT_ROI_LOW[0], CONF_LOW_Y: DEFAULT_ROI_LOW[1], CONF_LOW_W: DEFAULT_ROI_LOW[2], CONF_LOW_H: DEFAULT_ROI_LOW[3],
-            CONF_HALF_X: DEFAULT_ROI_HALF[0], CONF_HALF_Y: DEFAULT_ROI_HALF[1], CONF_HALF_W: DEFAULT_ROI_HALF[2], CONF_HALF_H: DEFAULT_ROI_HALF[3],
-            CONF_FULL_X: DEFAULT_ROI_FULL[0], CONF_FULL_Y: DEFAULT_ROI_FULL[1], CONF_FULL_W: DEFAULT_ROI_FULL[2], CONF_FULL_H: DEFAULT_ROI_FULL[3],
+            CONF_SKEW: DEFAULT_SKEW
         }
 
         return self.async_show_form(
