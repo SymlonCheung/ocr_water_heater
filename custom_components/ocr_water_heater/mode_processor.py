@@ -137,41 +137,39 @@ class ModeProcessor:
             if np.max(np.array(enhanced_panel)) < DEFAULT_NOISE_LIMIT:
                 return MODE_STANDBY, debug_imgs
 
-            # === A. OCR 区域安全检查 ===
-            rel_ocr = self._get_relative_roi(self.ocr_roi)
-            ocr_ratio = self._analyze_roi_local(enhanced_panel, rel_ocr, "OCR", debug_imgs)
-            if ocr_ratio < 0.10:
-                return MODE_STANDBY, debug_imgs
-
-            # === B. 优先检查：正在设置 ===
-            # "正在设置"通常比较特殊，如果它亮了，通常意味着其他模式的图标可能也会受到干扰
-            # 但你的逻辑是 Setting 优先，这没问题
+            # === 修改顺序 ===
+            
+            # 1. 优先检查：正在设置
+            # 如果 SET 亮了，说明屏幕肯定是亮着的，不需要管 OCR 分数
             rel_set = self._get_relative_roi(self.sub_rois['setting'])
             set_score = self._analyze_roi_local(enhanced_panel, rel_set, "SET", debug_imgs)
+            
             if set_score > MODE_ACTIVE_RATIO:
                 return MODE_SETTING, debug_imgs
 
-            # === C. 互斥模式 (核心修改) ===
-            # 这里是关键！我们计算所有模式的分数，取最高分，而不是按顺序 if
+            # 2. 其次检查：OCR 区域安全锁
+            # 如果不是在设置，且数字区域全黑，那才是真的待机
+            rel_ocr = self._get_relative_roi(self.ocr_roi)
+            ocr_ratio = self._analyze_roi_local(enhanced_panel, rel_ocr, "OCR", debug_imgs)
+            
+            if ocr_ratio < 0.10:
+                # _LOGGER.debug(f"OCR too dark ({ocr_ratio:.2f}), forcing STANDBY")
+                return MODE_STANDBY, debug_imgs
+
+            # 3. 最后检查：互斥模式 (Low/Half/Full)
             scores = {}
             for mode_key in ['low', 'half', 'full']:
                 rel = self._get_relative_roi(self.sub_rois[mode_key])
                 scores[mode_key] = self._analyze_roi_local(enhanced_panel, rel, f"Mode_{mode_key}", debug_imgs)
             
-            # 在日志里打印分数，方便以后排查 (Low: 0.32, Half: 0.44 -> Winner: Half)
-            _LOGGER.debug(f"Mode Scores: {scores}")
-
-            # 1. 找出分数最高的模式
             best_mode = max(scores, key=scores.get)
             best_score = scores[best_mode]
 
-            # 2. 判断最高分是否达标
             if best_score > MODE_ACTIVE_RATIO:
                 if best_mode == 'low': return MODE_LOW_POWER, debug_imgs
                 if best_mode == 'half': return MODE_HALF, debug_imgs
                 if best_mode == 'full': return MODE_FULL, debug_imgs
 
-            # 3. 都不达标 -> 待机
             return MODE_STANDBY, debug_imgs
 
         except Exception as e:
