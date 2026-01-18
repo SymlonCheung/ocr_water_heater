@@ -13,7 +13,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# === 核心配置 (移植自调试脚本) ===
+# === 核心配置 ===
 # 判定阈值：黑色像素占比 >= 50% 视为笔画存在
 ACTIVE_RATIO = 0.50
 # 笔画检测区域大小 (宽, 高)
@@ -21,7 +21,6 @@ SEGMENT_SIZE = (2, 2)
 
 # 七段数码管逻辑映射表
 # 顺序: a, b, c, d, e, f, g
-# 1=黑(有笔画), 0=白(无笔画)
 SEGMENT_MAP = {
     (1, 1, 1, 1, 1, 1, 0): 0, 
     (0, 1, 1, 0, 0, 0, 0): 1, 
@@ -36,18 +35,29 @@ SEGMENT_MAP = {
     (0, 0, 0, 0, 0, 0, 0): None
 }
 
-# 局部坐标定义
-# 基于调试脚本中的全局坐标 (769, 339) 计算得出的相对偏移量
-# 例如 a1(780, 344) - Origin(769, 339) = (11, 5)
+# 局部坐标定义 (相对 ROI 左上角)
+# 用于识别数字笔画
 LOCAL_SEGMENTS = {
-    # 左侧数字 (十位)
+    # 十位
     'a1': (11, 5),  'b1': (15, 8),  'c1': (13, 16),
     'd1': (8, 20),  'e1': (3, 16),  'f1': (5, 8),   'g1': (9, 12),
-    # 右侧数字 (个位)
+    # 个位
     'a0': (27, 5),  'b0': (31, 8),  'c0': (29, 15),
     'd0': (24, 19), 'e0': (20, 15), 'f0': (21, 8),  'g0': (25, 11)
 }
 
+# === 新增：哨兵点 (Guard Points) ===
+# 这些坐标必须是背景（白色/0像素占比低）。
+# 如果这些点被检测为黑色（有笔画），说明图像二值化异常（如全黑），应直接丢弃。
+# 坐标计算：
+# 上方哨兵：a1(y=5) - 4 = y=1
+# 下方哨兵：d1(y=20) + 高度2 + 2 = y=24
+GUARD_SEGMENTS = {
+    'Check_Top_10': (11, 1),   # 十位上方
+    'Check_Bot_10': (8, 24),   # 十位下方
+    'Check_Top_01': (27, 1),   # 个位上方
+    'Check_Bot_01': (24, 23)   # 个位下方 (d0在19, +4=23)
+}
 
 class OCRProcessor:
     """Class to handle OCR logic using PIL only (No OpenCV)."""
@@ -62,9 +72,7 @@ class OCRProcessor:
         self._skew = skew
 
     def _get_otsu_threshold(self, img_gray):
-        """
-        手动实现 Otsu 阈值算法 (替代 cv2.threshold)
-        """
+        """手动实现 Otsu 阈值算法"""
         hist = img_gray.histogram()
         total = sum(hist)
         current_max, threshold = 0, 0
@@ -92,6 +100,24 @@ class OCRProcessor:
 
         return threshold
 
+    def _check_zone_active(self, np_bin, x, y, w, h):
+        """检查指定区域是否“激活”（黑色像素占比高）"""
+        # 边界检查
+        max_h, max_w = np_bin.shape
+        if x < 0 or y < 0 or x + w > max_w or y + h > max_h:
+            return False, 0.0
+
+        # 提取区域 (注意 numpy 是 [y, x])
+        zone = np_bin[y : y + h, x : x + w]
+        
+        zone_total = zone.size
+        # 统计黑色像素 (假设处理后 0=黑/笔画, 255=白/背景)
+        zone_white = np.count_nonzero(zone == 255)
+        zone_black = zone_total - zone_white
+        
+        ratio = zone_black / zone_total if zone_total > 0 else 0
+        return (ratio >= ACTIVE_RATIO), ratio
+
     def process_image(self, img_bytes):
         """
         Main function. Processes image using PIL and Heuristic Segment Analysis.
@@ -102,124 +128,112 @@ class OCRProcessor:
             return None, debug_imgs
 
         try:
-            # 1. 打开图片
             full_img = Image.open(io.BytesIO(img_bytes))
         except Exception as e:
             _LOGGER.error(f"Failed to open image: {e}")
             return None, debug_imgs
 
-        # 2. 裁剪 ROI
-        # self._roi 格式为 (x, y, w, h)
+        # 1. 裁剪 ROI
         rx, ry, rw, rh = self._roi
-        # PIL crop 需要 (left, top, right, bottom)
         crop_box = (rx, ry, rx + rw, ry + rh)
         
         try:
-            # 转换为灰度图 'L'
             ocr_img = full_img.crop(crop_box).convert("L")
             debug_imgs["01_Crop_Gray.jpg"] = ocr_img
         except Exception as e:
             _LOGGER.error(f"Crop failed: {e}")
             return None, debug_imgs
 
-        # 3. 亮度检查 (防止黑屏噪音)
+        # 2. 亮度检查 (防止严重黑屏)
         np_img = np.array(ocr_img)
         max_val = np.max(np_img) if np_img.size > 0 else 0
         
         if max_val < OCR_MIN_PEAK_BRIGHTNESS:
-            _LOGGER.debug(f"Skipping OCR: Image too dark (Max:{max_val})")
+            # _LOGGER.debug(f"Skipping OCR: Image too dark (Max:{max_val})")
             debug_imgs["00_Skipped_Dark.jpg"] = ocr_img
             return None, debug_imgs
 
-        # 4. Otsu 二值化
+        # 3. Otsu 二值化 & 背景统一
         thresh_val = self._get_otsu_threshold(ocr_img)
-        # point: >阈值变255(白), <阈值变0(黑)
         binary_img = ocr_img.point(lambda p: 255 if p > thresh_val else 0)
         
-        # 5. 背景统一 (确保白底黑字)
-        # 统计白色像素
+        # 统计白色像素，如果白色少于一半，说明背景是黑的，反转为“白底黑字”
         np_bin = np.array(binary_img)
         white_pixels = np.count_nonzero(np_bin == 255)
-        total_pixels = np_bin.size
-        
-        # 如果白色少于一半，说明背景是黑的(字是白的)，需要反转
-        if white_pixels < (total_pixels * 0.5):
+        if white_pixels < (np_bin.size * 0.5):
             binary_img = ImageOps.invert(binary_img)
-            np_bin = np.array(binary_img) # 更新 numpy 数组
+            np_bin = np.array(binary_img) # 更新 numpy 数组用于后续计算
 
-        # 6. 识别逻辑 (七段数码管扫描)
-        # 转为 RGB 用于在 debug 图上画框
+        # 准备画板
         canvas = binary_img.convert("RGB")
         draw = ImageDraw.Draw(canvas)
-        
+        sw, sh = SEGMENT_SIZE
+
+        # === 4. 哨兵检查 (Guard Check) ===
+        # 必须确保数字上方和下方的背景区域是“白”的(非激活)。
+        # 如果这些地方是黑的，说明全图噪音或反转错误，直接视为无效。
+        guard_failed = False
+        for g_name, (gx, gy) in GUARD_SEGMENTS.items():
+            is_active, ratio = self._check_zone_active(np_bin, gx, gy, sw, sh)
+            
+            # 画出来看看：蓝色=正常(背景), 黄色=异常(检测到笔画)
+            g_color = (0, 0, 255) # Blue (Pass)
+            if is_active:
+                guard_failed = True
+                g_color = (255, 255, 0) # Yellow (Fail)
+                _LOGGER.debug(f"Guard Failed: {g_name} active ratio {ratio:.2f}")
+
+            draw.rectangle([gx, gy, gx + sw - 1, gy + sh - 1], outline=g_color)
+
+        if guard_failed:
+            # _LOGGER.debug("OCR rejected by guard points (Background noise detected)")
+            # 即使失败也保存图片，方便调试看出是哪个点挂了
+            large_canvas = canvas.resize((rw * 5, rh * 5), resample=Image.NEAREST)
+            debug_imgs["02_Guard_Failed.jpg"] = large_canvas
+            return None, debug_imgs
+
+        # === 5. 正常数字识别逻辑 ===
         digits_result = {}
         seg_order = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
         
-        # 遍历两个数字位: '1' (十位), '0' (个位)
         for pos in ['1', '0']:
             states = []
             for seg in seg_order:
                 key = f"{seg}{pos}"
-                # 获取局部坐标 (相对于 ROI 左上角)
                 lx, ly = LOCAL_SEGMENTS.get(key, (0, 0))
-                sw, sh = SEGMENT_SIZE
                 
-                # 边界安全检查
-                if lx < 0 or ly < 0 or lx + sw > rw or ly + sh > rh:
-                    states.append(0) # 越界视为无笔画
-                    continue
+                is_active, _ = self._check_zone_active(np_bin, lx, ly, sw, sh)
+                states.append(1 if is_active else 0)
                 
-                # 提取区域像素 (Numpy 切片 [row, col] -> [y, x])
-                zone = np_bin[ly : ly + sh, lx : lx + sw]
-                
-                # 计算黑色像素 (值=0) 的比例
-                zone_total = zone.size
-                zone_white = np.count_nonzero(zone == 255)
-                zone_black = zone_total - zone_white
-                
-                ratio = zone_black / zone_total if zone_total > 0 else 0
-                
-                # 判定: 黑色足够多说明有笔画
-                is_active = 1 if ratio >= ACTIVE_RATIO else 0
-                states.append(is_active)
-                
-                # Debug 绘图: 绿色=Active, 红色=Inactive
+                # 绿色=有笔画, 红色=无笔画
                 color = (0, 255, 0) if is_active else (255, 0, 0)
                 draw.rectangle([lx, ly, lx + sw - 1, ly + sh - 1], outline=color)
 
-            # 查表获取数字
             digits_result[pos] = SEGMENT_MAP.get(tuple(states), "?")
 
-        # 7. 结果组装与验证
+        # 6. 结果输出
         digit_ten = digits_result.get('1', '?')
         digit_one = digits_result.get('0', '?')
-        
         res_str = f"{digit_ten}{digit_one}"
         
-        # 保存带框的识别图供 Debug
-        # 为了清晰，放大 5 倍
+        # 绘制结果文字
         large_canvas = canvas.resize((rw * 5, rh * 5), resample=Image.NEAREST)
         draw_large = ImageDraw.Draw(large_canvas)
-        # 简单写一下识别结果
-        # 注意: Home Assistant 容器内可能缺少默认字体，如果报错可移除 text 绘制
         try:
             draw_large.text((5, 5), res_str, fill=(0, 255, 255))
         except IOError:
-            pass # 忽略字体缺失错误
+            pass 
 
         debug_imgs[f"02_Result_{res_str}.jpg"] = large_canvas
 
-        # 转换为整数并验证范围
         try:
             if '?' in res_str or 'None' in res_str:
-                _LOGGER.debug(f"OCR Unsure: {res_str}")
                 return None, debug_imgs
                 
             val = int(res_str)
             if VALID_MIN <= val <= VALID_MAX:
                 return val, debug_imgs
             else:
-                _LOGGER.debug(f"OCR Out of Range: {val}")
                 return None, debug_imgs
         except ValueError:
             return None, debug_imgs
