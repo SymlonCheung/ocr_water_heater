@@ -40,5 +40,21 @@
     "abort": {
       "already_configured": "该设备已配置"
     }
+  },
+  "entity": {
+    "water_heater": {
+      "smart_water_heater": {
+        "state_attributes": {
+          "operation_mode": {
+            "state": {
+              "eco": "低功率",
+              "performance": "速热半缸",
+              "high_demand": "速热全缸",
+              "off": "关闭"
+            }
+          }
+        }
+      }
+    }
   }
 }
